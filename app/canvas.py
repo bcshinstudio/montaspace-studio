@@ -140,7 +140,7 @@ class Canvas(QGraphicsView):
         for video in self.video_items():
             video.release()
 
-    def add_video(self, filename, scene_pos=None):
+    def add_video(self, filename, scene_pos=None, show_controls=True):
         if Path(filename).suffix.lower() not in VIDEO_EXTENSIONS or not Path(filename).is_file():
             return False
         item = VideoItem(filename)
@@ -152,7 +152,8 @@ class Canvas(QGraphicsView):
         self.scene_area.clearSelection()
         item.setSelected(True)
         self.window.update_modified_title()
-        item.controls(self.window)
+        if show_controls:
+            item.controls(self.window)
         return True
 
     def insert_video(self):
@@ -232,10 +233,29 @@ class Canvas(QGraphicsView):
         self.window.update_modified_title()
         self.record_edit(before, "Delete image")
 
+    def _video_at_view_pos(self, pos):
+        """Resolve a video beneath the pointer, including its placeholder children."""
+        point = self.mapToScene(pos)
+        for hit in self.scene_area.items(point):
+            item = hit
+            while item is not None and not isinstance(item, VideoItem):
+                item = item.parentItem()
+            if isinstance(item, VideoItem) and item.boundingRect().contains(item.mapFromScene(point)):
+                return item
+        return None
+
     def mouseDoubleClickEvent(self, event):
-        """Enter crop mode on a double-clicked photo."""
+        """Double-left-click videos to play/pause; retain photo double-click crop."""
+        if event.button() == Qt.MouseButton.LeftButton and not self.active_crop:
+            video = self._video_at_view_pos(event.position().toPoint())
+            if video is not None:
+                self.scene_area.clearSelection()
+                video.setSelected(True)
+                video.toggle_playback()
+                event.accept()
+                return
         item = self.itemAt(event.position().toPoint())
-        if isinstance(item, ImageItem):
+        if isinstance(item, ImageItem) and event.button() == Qt.MouseButton.LeftButton:
             self.begin_crop(item)
             event.accept()
             return
@@ -513,6 +533,16 @@ class Canvas(QGraphicsView):
         self.window.update_resize_hover(window_pos)
 
     def mousePressEvent(self, event):
+        # Middle-click on a video toggles the existing non-modal control dialog.
+        # Empty-whiteboard and photo middle-clicks retain their previous behavior.
+        if event.button() == Qt.MouseButton.MiddleButton and not self.active_crop:
+            video = self._video_at_view_pos(event.position().toPoint())
+            if video is not None:
+                self.scene_area.clearSelection()
+                video.setSelected(True)
+                video.toggle_controls(self.window)
+                event.accept()
+                return
         if event.button() == Qt.MouseButton.LeftButton:
             pos = self.mapTo(self.window, event.position().toPoint())
             edges = self.window.resize_edges(pos)

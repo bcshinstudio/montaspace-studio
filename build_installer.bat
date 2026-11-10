@@ -2,7 +2,7 @@
 setlocal
 cd /d "%~dp0"
 
-echo MontaSpace Studio v0.3.4 - build application + free NSIS installer
+echo MontaSpace Studio v0.4.1 - build application + free NSIS installer
 echo.
 if not exist ".venv\Scripts\python.exe" (
   echo ERROR: Missing .venv. Keep your existing Python virtual environment.
@@ -38,7 +38,7 @@ echo Compiling NSIS installer...
 if errorlevel 1 goto :fail
 
 rem Never clean intermediate files unless the expected installer exists.
-if not exist "installer-output\MontaSpaceStudio_Setup_0.3.4.exe" (
+if not exist "installer-output\MontaSpaceStudio_Setup_0.4.1.exe" (
   echo ERROR: NSIS returned success, but the expected installer is missing.
   goto :fail
 )
@@ -56,7 +56,7 @@ if exist "dist\" echo WARNING: Could not fully remove dist\. Close running EXEs 
 if exist "MontaSpaceStudio.spec" echo WARNING: Could not remove MontaSpaceStudio.spec.
 
 echo.
-echo SUCCESS: installer-output\MontaSpaceStudio_Setup_0.3.4.exe
+echo SUCCESS: installer-output\MontaSpaceStudio_Setup_0.4.1.exe
 echo NOTE: The installer is unsigned, so Windows may show a SmartScreen warning.
 pause
 exit /b 0

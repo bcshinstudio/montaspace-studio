@@ -3,7 +3,7 @@ Unicode true
 !include "LogicLib.nsh"
 
 !define PRODUCT_NAME "MontaSpace Studio"
-!define PRODUCT_VERSION "0.3.4"
+!define PRODUCT_VERSION "0.4.2"
 !define PRODUCT_PUBLISHER "BC Shin Studio"
 !define PRODUCT_URL "https://www.bcshinstudio.com"
 !define PRODUCT_EXE "MontaSpaceStudio.exe"
@@ -15,12 +15,12 @@ InstallDir "$LOCALAPPDATA\Programs\MontaSpaceStudio"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
-VIProductVersion "0.3.4.0"
+VIProductVersion "0.4.2.0"
 VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
 VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"
 VIAddVersionKey "FileDescription" "MontaSpace Studio Installer"
-VIAddVersionKey "FileVersion" "0.3.4.0"
-VIAddVersionKey "ProductVersion" "0.3.4"
+VIAddVersionKey "FileVersion" "0.4.2.0"
+VIAddVersionKey "ProductVersion" "0.4.2"
 VIAddVersionKey "LegalCopyright" "Copyright (C) 2026 BC Shin Studio. All rights reserved."
 
 !define MUI_ABORTWARNING

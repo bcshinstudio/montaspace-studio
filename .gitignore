@@ -13,6 +13,8 @@ installer-output/
 # Local, personal MontaSpace documents
 *.mspace
 *.mspacepack
+*.mstudio
+*.mstudiopack
 
 # Local editor settings, logs, and temporary files
 .vscode/

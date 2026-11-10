@@ -2,7 +2,10 @@
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QSizeF, QUrl
+from PySide6.QtGui import QBrush, QColor, QPen
 from PySide6.QtWidgets import (
+    QGraphicsRectItem,
+    QGraphicsSimpleTextItem,
     QCheckBox,
     QDialog,
     QGridLayout,
@@ -46,6 +49,22 @@ class VideoItem(QGraphicsVideoItem):
         self.player.setAudioOutput(self.audio)
         self.player.setVideoOutput(self)
         self.player.setSource(QUrl.fromLocalFile(self.filename))
+        # QGraphicsVideoItem may paint no visible frame until playback begins.
+        # Keep a clearly identifiable video tile visible on a reopened board,
+        # without starting playback or allocating a decoded video thumbnail.
+        self._placeholder = QGraphicsRectItem(self.boundingRect(), self)
+        self._placeholder.setBrush(QBrush(QColor(32, 43, 56)))
+        self._placeholder.setPen(QPen(QColor(90, 108, 123)))
+        self._placeholder.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        self._placeholder_text = QGraphicsSimpleTextItem(
+            '▶ MP4 video\n' + Path(self.filename).name[:48] + '\nRight-click → Playback Controls',
+            self._placeholder,
+        )
+        self._placeholder_text.setBrush(QBrush(QColor(235, 242, 250)))
+        self._placeholder_text.setPos(14, 14)
+        self._placeholder_text.setAcceptedMouseButtons(Qt.MouseButton.NoButton)
+        # Hide the tile as soon as Qt renders a decoded frame.
+        self.videoSink().videoFrameChanged.connect(self._on_video_frame)
         self.player.positionChanged.connect(self._handle_position_changed)
         self.player.mediaStatusChanged.connect(self._handle_media_status)
         self._controls = None
@@ -58,6 +77,10 @@ class VideoItem(QGraphicsVideoItem):
         video_lifecycle.observe(self.player, "media player")
         video_lifecycle.observe(self.audio, "audio output")
 
+    def _on_video_frame(self, frame):
+        if frame.isValid():
+            self._placeholder.hide()
+
     def controls(self, parent):
         if self._controls is None:
             self._controls = VideoControls(self, parent)
@@ -65,6 +88,26 @@ class VideoItem(QGraphicsVideoItem):
         self._controls.show()
         self._controls.raise_()
         self._controls.activateWindow()
+
+    def toggle_controls(self, parent):
+        """Open/close this video's playback dialog without changing playback."""
+        if self._released:
+            return
+        if self._controls is not None:
+            dialog = self._controls
+            self._controls = None
+            dialog.close()
+        else:
+            self.controls(parent)
+
+    def toggle_playback(self):
+        """Play/pause on demand; do not create or display playback controls."""
+        if self._released:
+            return
+        if self.player.playbackState() == QMediaPlayer.PlaybackState.PlayingState:
+            self.player.pause()
+        else:
+            self.player.play()
 
     def release(self):
         """Permanently release Qt/FFmpeg resources before removing the video.
@@ -247,10 +290,12 @@ class VideoControls(QDialog):
     def capture_a(self):
         self.video.set_loop_a(self.video.player.position())
         self.refresh_loop_ui()
+        self._notify_project_change()
 
     def capture_b(self):
         self.video.set_loop_b(self.video.player.position())
         self.refresh_loop_ui()
+        self._notify_project_change()
 
     def go_a(self):
         if self.video.loop_a_ms is not None:
@@ -263,6 +308,7 @@ class VideoControls(QDialog):
     def clear_loop(self):
         self.video.clear_loop()
         self.refresh_loop_ui()
+        self._notify_project_change()
 
     def toggle_loop(self, checked):
         if checked and not self.video.has_valid_loop():
@@ -277,6 +323,12 @@ class VideoControls(QDialog):
             return
         self.video.set_loop_enabled(checked)
         self.refresh_loop_ui()
+        self._notify_project_change()
+
+    def _notify_project_change(self):
+        parent = self.parent()
+        if parent is not None and hasattr(parent, "update_modified_title"):
+            parent.update_modified_title()
 
     def refresh_loop_ui(self):
         a_ms = self.video.loop_a_ms
