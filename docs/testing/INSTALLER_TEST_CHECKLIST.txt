@@ -1,0 +1,17 @@
+MontaSpace v0.8.2 — Installer checklist (Windows)
+
+1. Build: Double-click build_installer.bat. Confirm installer-output\MontaSpace_Setup_0.8.2.exe exists.
+2. Install: Run setup. Confirm the installer offers user-level directory and optional desktop shortcut.
+3. Launch from Start menu. About should display v0.8.2.
+4. Insert, crop, rotate, resize, and move an image. Undo/Redo.
+5. Open an existing .mspace and .mspacepack file.
+6. Save a NEW linked and portable project under Documents, outside installation folder.
+7. Close app, uninstall through Windows Settings -> Apps -> Installed apps.
+8. Confirm Start menu and desktop shortcuts removed.
+9. Confirm saved projects under Documents remain intact.
+10. Optional: Reinstall and verify project files still open.
+
+IMPORTANT: Back up important projects before testing. Do not uninstall an older build installed
+under the same path while it is running. For first release, test on your own PC before distributing.
+
+Do not publish the setup EXE until it has been built and tested on Windows.

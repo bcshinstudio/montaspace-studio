@@ -1,0 +1,15 @@
+MontaSpace v0.8.1 - Step 9 Windows Checklist
+
+1. Run .venv\Scripts\python.exe main.py; About reports 0.8.1.
+2. Open existing .mspace and .mspacepack files.
+3. Insert same image twice, rotate/crop/resize independently; no change in image quality or behavior.
+4. Duplicate / Undo / Redo / layer change / re-crop test.
+5. Right-click > Performance Info: current and peak RAM appear.
+6. With app CLOSED, run run_stress_test.bat 25 then 50; optional 100 if sufficient memory.
+7. Confirm each report exists in Documents\MontaSpace_Test_Reports.
+8. Ensure no test images or project files remain in your project folder.
+9. Save a portable project and reopen it after moving it.
+10. Only after checks pass commit and tag v0.8.1.
+
+Stress test notes: creates and removes all synthetic images under a temporary folder.
+It does not read personal photos or modify projects. CPU/RAM metrics vary by machine.

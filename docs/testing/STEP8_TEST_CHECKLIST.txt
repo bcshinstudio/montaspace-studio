@@ -1,0 +1,12 @@
+MontaSpace Step 8 Windows checklist (v0.8.0)
+[ ] Launch; About shows 0.8.0; correct icon
+[ ] Insert, drag/drop, move, scale, rotate
+[ ] Crop/recrop near overlapping images
+[ ] Select hidden image; Arrange front/back
+[ ] Ctrl+Z / Ctrl+Y / Ctrl+D / Ctrl+A / Delete
+[ ] Open old linked .mspace
+[ ] Open old portable .mspacepack
+[ ] Save and reopen new linked and portable projects
+[ ] New/Open/Exit prompts on unsaved work
+[ ] Performance Info returns Windows RAM value
+[ ] Build and run EXE, then check icon and file version
