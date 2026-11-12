@@ -2,6 +2,8 @@
 from PySide6.QtCore import Qt, QRectF, QLineF
 from PySide6.QtGui import QColor, QBrush, QPainter, QPen, QPainterPath
 from PySide6.QtWidgets import QGraphicsItem
+from .edit_handles import EditHandles, crop_anchors
+from .edge_hit import hit_rect_edge
 
 
 class ImageItem(QGraphicsItem):
@@ -11,7 +13,7 @@ class ImageItem(QGraphicsItem):
 
     CROP_HANDLE_SIZE = 20.0
 
-    CROP_GRAB_MARGIN = 14.0
+    CROP_GRAB_MARGIN = 12.0
 
     ROTATE_OFFSET = 34.0
 
@@ -47,33 +49,34 @@ class ImageItem(QGraphicsItem):
         )
         self.setAcceptHoverEvents(True)
         self.setTransformOriginPoint(self.full_rect.center())
+        self._edit_handles = EditHandles(self, rotation=True)
+        self._refresh_handles()
+
+    def _refresh_handles(self):
+        self._edit_handles.update(self.crop_rect, self.isSelected(),
+                                  self.crop_mode, self.ROTATE_OFFSET)
+
+    def itemChange(self, change, value):
+        result = super().itemChange(change, value)
+        if change in (QGraphicsItem.GraphicsItemChange.ItemSelectedHasChanged,
+                      QGraphicsItem.GraphicsItemChange.ItemScaleHasChanged):
+            self._refresh_handles()
+            self.update()
+        return result
 
     def handles(self):
-        r = self.crop_rect
-        # During crop mode, keep handles large even when the image is scaled down.
-        size = (self.CROP_HANDLE_SIZE / max(self.scale(), 0.05)
-                if self.crop_mode else self.HANDLE_SIZE)
+        """All eight resize/crop positions; rotation remains photo-only."""
+        size = 8.0 / max(self.scale(), 0.05)
         half = size / 2
-        points = {
-            "tl": r.topLeft(), "tr": r.topRight(),
-            "bl": r.bottomLeft(), "br": r.bottomRight(),
-        }
-        if self.crop_mode:
-            points.update({
-                "top": (r.topLeft() + r.topRight()) / 2,
-                "bottom": (r.bottomLeft() + r.bottomRight()) / 2,
-                "left": (r.topLeft() + r.bottomLeft()) / 2,
-                "right": (r.topRight() + r.bottomRight()) / 2,
-            })
         result = {
-            name: QRectF(p.x() - half, p.y() - half, size, size)
-            for name, p in points.items()
+            name: QRectF(point.x() - half, point.y() - half, size, size)
+            for name, point in crop_anchors(self.crop_rect).items()
         }
         if not self.crop_mode:
-            result["rotate"] = QRectF(
-                r.center().x() - half, r.top() - self.ROTATE_OFFSET - half,
-                self.HANDLE_SIZE, self.HANDLE_SIZE,
-            )
+            point = self.crop_rect.center()
+            result["rotate"] = QRectF(point.x() - half,
+                                      self.crop_rect.top() - self.ROTATE_OFFSET - half,
+                                      size, size)
         return result
 
     def boundingRect(self):
@@ -86,50 +89,26 @@ class ImageItem(QGraphicsItem):
         path = QPainterPath()
         path.addRect(self.full_rect if self.crop_mode else self.crop_rect)
         if self.isSelected():
-            padding = (self.CROP_GRAB_MARGIN / max(self.scale(), 0.05)
-                       if self.crop_mode else 5)
+            padding = self.CROP_GRAB_MARGIN / max(self.scale(), 0.05)
             for rect in self.handles().values():
                 path.addRect(rect.adjusted(-padding, -padding, padding, padding))
         return path
 
     def handle_at(self, pos):
+        """Use the entire border, not just the visible eight handle squares."""
         if not self.isSelected():
             return None
-        padding = (self.CROP_GRAB_MARGIN / max(self.scale(), 0.05)
-                   if self.crop_mode else 5)
-        for name, rect in self.handles().items():
-            if rect.adjusted(-padding, -padding, padding, padding).contains(pos):
-                return name
-
-        # In crop mode, dragging close to any boundary works too,
-        # even when the pointer isn't exactly over a square handle.
-        if self.crop_mode:
-            r = self.crop_rect
-            margin = self.CROP_GRAB_MARGIN / max(self.scale(), 0.05)
-            near_left = abs(pos.x() - r.left()) <= margin
-            near_right = abs(pos.x() - r.right()) <= margin
-            near_top = abs(pos.y() - r.top()) <= margin
-            near_bottom = abs(pos.y() - r.bottom()) <= margin
-            within_x = r.left() - margin <= pos.x() <= r.right() + margin
-            within_y = r.top() - margin <= pos.y() <= r.bottom() + margin
-            if within_x and within_y:
-                if near_left and near_top:
-                    return "tl"
-                if near_right and near_top:
-                    return "tr"
-                if near_left and near_bottom:
-                    return "bl"
-                if near_right and near_bottom:
-                    return "br"
-                if near_left:
-                    return "left"
-                if near_right:
-                    return "right"
-                if near_top:
-                    return "top"
-                if near_bottom:
-                    return "bottom"
-        return None
+        # Preserve the photo-only rotation control in its existing location.
+        if hasattr(self, "_edit_handles") and getattr(self._edit_handles, "_rotate", None) is not None and not self.crop_mode:
+            rotate_rect = self.handles().get("rotate")
+            if rotate_rect is not None:
+                padding = 7.0 / max(self.scale(), 0.05)
+                if rotate_rect.adjusted(-padding, -padding, padding, padding).contains(pos):
+                    return "rotate"
+        r = self.crop_rect
+        scale = max(self.scale(), 0.05)
+        return hit_rect_edge(pos.x(), pos.y(), r.left(), r.top(), r.right(), r.bottom(),
+                             tolerance=13.0 / scale, corner_tolerance=20.0 / scale)
 
     def paint(self, painter, option, widget=None):
         painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
@@ -145,22 +124,19 @@ class ImageItem(QGraphicsItem):
 
         if not self.isSelected():
             return
-        pen = QPen(QColor("#1676d2"), 2.5 if self.crop_mode else 1.5)
+        # All handle squares are separate fixed-size children. Only the
+        # border and photo rotation stem are painted in item coordinates.
+        pen = QPen(QColor("#1676d2"))
+        pen.setWidthF(1.0)
+        pen.setCosmetic(True)
         painter.setPen(pen)
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(self.crop_rect)
-        handle_rects = self.handles()
-        if "rotate" in handle_rects:
+        if not self.crop_mode:
             painter.drawLine(
                 self.crop_rect.center().x(), self.crop_rect.top(),
-                handle_rects["rotate"].center().x(), handle_rects["rotate"].center().y(),
+                self.crop_rect.center().x(), self.crop_rect.top() - self.ROTATE_OFFSET,
             )
-        painter.setBrush(QBrush(QColor("#ffffff")))
-        for name, rect in handle_rects.items():
-            if name == "rotate":
-                painter.drawEllipse(rect)
-            else:
-                painter.drawRect(rect)
 
     def start_crop(self):
         if self.crop_mode:
@@ -168,6 +144,7 @@ class ImageItem(QGraphicsItem):
         self.crop_before_edit = QRectF(self.crop_rect)
         self.crop_mode = True
         self.setSelected(True)
+        self._refresh_handles()
         self.update()
 
     def end_crop(self, apply):
@@ -178,6 +155,7 @@ class ImageItem(QGraphicsItem):
         self.crop_before_edit = None
         self.crop_mode = False
         self._mode = None
+        self._refresh_handles()
         self.update()
 
     def mouseDoubleClickEvent(self, event):
@@ -233,6 +211,7 @@ class ImageItem(QGraphicsItem):
             if self._handle in ("bl", "br", "bottom"):
                 bottom = max(min(bottom + dy, self.full_rect.bottom()), top + self.MIN_CROP)
             self.crop_rect = QRectF(left, top, right - left, bottom - top)
+            self._refresh_handles()
             self.update()
             event.accept()
             return
@@ -265,20 +244,16 @@ class ImageItem(QGraphicsItem):
 
     def hoverMoveEvent(self, event):
         name = self.handle_at(event.pos())
-        if self.crop_mode and name in ("tl", "br"):
-            self.setCursor(Qt.CursorShape.SizeFDiagCursor)
-        elif self.crop_mode and name in ("tr", "bl"):
-            self.setCursor(Qt.CursorShape.SizeBDiagCursor)
-        elif self.crop_mode and name in ("left", "right"):
-            self.setCursor(Qt.CursorShape.SizeHorCursor)
-        elif self.crop_mode and name in ("top", "bottom"):
-            self.setCursor(Qt.CursorShape.SizeVerCursor)
-        elif name == "rotate":
-            self.setCursor(Qt.CursorShape.CrossCursor)
-        elif name in ("tl", "br"):
+        if name in ("tl", "br"):
             self.setCursor(Qt.CursorShape.SizeFDiagCursor)
         elif name in ("tr", "bl"):
             self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+        elif name in ("left", "right"):
+            self.setCursor(Qt.CursorShape.SizeHorCursor)
+        elif name in ("top", "bottom"):
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        elif name == "rotate":
+            self.setCursor(Qt.CursorShape.CrossCursor)
         else:
             self.unsetCursor()
         super().hoverMoveEvent(event)

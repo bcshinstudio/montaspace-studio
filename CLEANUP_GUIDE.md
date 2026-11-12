@@ -1,15 +1,22 @@
-# MontaSpace Studio v0.4.1 — Replacement instructions
+# Commit preparation — MontaSpace Studio v0.5.20
 
-This source package is independent of the original photo-only MontaSpace project.
-It contains the Studio source, installer script, icon, and documentation.
+This is the **source-only** package. It excludes `.git/`, `.venv/`, bytecode caches, generated builds, logs and personal project/media files.
 
-1. Close Studio and back up `C:\Users\baech\Projects\montaspace2`.
-2. Extract the ZIP into `C:\Users\baech\Projects\` and merge its
-   `montaspace2` folder into your existing Studio folder.
-3. Keep your local `.git` and `.venv` folders; they are not in this ZIP.
-4. Run `.venv\Scripts\python.exe main.py` and check About v0.4.1.
-5. Test **Save As** to `.mstudio` and `.mstudiopack` with copies of media.
-6. Do not tag v0.4.1 or build the public installer until Windows testing passes.
+1. Keep the existing project directory and **do not delete `.git/` or `.venv/`**.
+2. Close Studio; back up your project if desired.
+3. Extract the provided ZIP into `C:\Users\baech\Projects\` and merge its `montaspace2` directory into the existing directory.
+4. Run the tests and launch Studio to confirm the thumbnail, A/B timeline, and linked/portable save/load work.
+5. Inspect Git changes, then commit:
 
-Build artifacts (`build/`, `dist/`, `installer-output/`, `*.spec`) are excluded.
-Both Studio project formats are ignored by Git to avoid committing user media.
+```cmd
+cd C:\Users\baech\Projects\montaspace2
+.venv\Scripts\python.exe -m unittest discover -s tests -v
+git status --short
+git add -A
+git diff --cached --stat
+git diff --cached --check
+git commit -m "MontaSpace Studio v0.5.20 - video thumbnails and timeline fixes"
+git push origin main
+```
+
+If Git reports unexpected personal files, unstage them before committing. The source ZIP does not contain your `.git` history or Python environment.

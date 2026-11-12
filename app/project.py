@@ -16,6 +16,7 @@ from PySide6.QtCore import QRectF, QTemporaryDir
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from .config import APP_NAME, PROJECT_FILTER, SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS
+from .video_poster import poster_cache, MAX_POSTER_BYTES
 
 STUDIO_EXTENSIONS = {".mstudio", ".mstudiopack"}
 LEGACY_EXTENSIONS = {".mspace", ".mspacepack"}
@@ -39,15 +40,30 @@ class ProjectPersistenceMixin:
                 "crop": [crop.x(), crop.y(), crop.width(), crop.height()],
             })
         for video in self.canvas.video_items():
+            crop = video.crop_rect
+            full = video.base_rect()
+            # Relative crop coordinates survive asynchronous native aspect changes.
+            crop_fraction = [
+                round(crop.x() / full.width(), 8),
+                round(crop.y() / full.height(), 8),
+                round(crop.width() / full.width(), 8),
+                round(crop.height() / full.height(), 8),
+            ]
             records.append({
                 "type": "video",
                 "source": str(Path(video.filename).resolve()),
                 "x": video.pos().x(), "y": video.pos().y(),
                 "scale": video.scale(), "rotation": video.rotation(),
                 "z": video.zValue(),
+                "display_size": video.verified_display_size(),
                 "loop_a_ms": video.loop_a_ms,
                 "loop_b_ms": video.loop_b_ms,
                 "loop_enabled": video.loop_enabled,
+                "content_zoom": video.content_zoom,
+                "crop": crop_fraction,
+                "crop_unit": "relative",
+                "pan_x": video.pan_x,
+                "pan_y": video.pan_y,
             })
         # Make snapshots reproducible regardless of QGraphicsScene iteration order.
         records.sort(key=lambda r: (r["z"], r["type"], r["source"], r["x"], r["y"]))
@@ -176,6 +192,12 @@ class ProjectPersistenceMixin:
                         method = (zipfile.ZIP_STORED if src.suffix.lower() in VIDEO_EXTENSIONS
                                   else zipfile.ZIP_DEFLATED)
                         archive.write(src, arcname=arcname, compress_type=method)
+                        if src.suffix.lower() in VIDEO_EXTENSIONS:
+                            poster = poster_cache.file_for(src)
+                            if poster is not None:
+                                poster_name = 'posters/' + Path(arcname).stem + '.jpg'
+                                archive.write(poster, arcname=poster_name,
+                                              compress_type=zipfile.ZIP_STORED)
             else:
                 with temp_path.open("w", encoding="utf-8") as handle:
                     json.dump(payload, handle, indent=2, ensure_ascii=False)
@@ -233,6 +255,7 @@ class ProjectPersistenceMixin:
         portable = target.suffix.lower() == ".mstudiopack"
         temp_dir = None
         embedded_paths = set()
+        embedded_posters = {}
         try:
             if portable:
                 temp_dir = QTemporaryDir()
@@ -243,7 +266,9 @@ class ProjectPersistenceMixin:
                     parsed = self._parse_studio_records(data, target, portable=True)
                     names = {record["source"] for record in parsed}
                     files = {i.filename: i for i in archive.infolist()}
-                    if len(files) > MAX_MEDIA_ITEMS + 1 or len(files) != len(archive.infolist()):
+                    # In addition to each media file, a v0.5.14 portable
+                    # project may contain one tiny JPEG poster per video.
+                    if len(files) > 2 * MAX_MEDIA_ITEMS + 1 or len(files) != len(archive.infolist()):
                         raise ValueError("Invalid or oversized archive file list.")
                     total = 0
                     for name in names:
@@ -263,6 +288,16 @@ class ProjectPersistenceMixin:
                         if any(suffix not in (VIDEO_EXTENSIONS if typ == "video" else SUPPORTED_EXTENSIONS)
                                for typ in record_types):
                             raise ValueError("Embedded file type does not match media type.")
+                    # Optional poster bytes are small, untrusted images: only
+                    # load strict names corresponding to embedded MP4s.
+                    embedded_posters = {}
+                    for name in names:
+                        if name.startswith('videos/'):
+                            poster_name = 'posters/' + Path(name).stem + '.jpg'
+                            poster_info = files.get(poster_name)
+                            if (poster_info is not None and not poster_info.is_dir()
+                                    and poster_info.file_size <= MAX_POSTER_BYTES):
+                                embedded_posters[name] = archive.read(poster_info)
                     for name in names:
                         dest = Path(temp_dir.path()) / name
                         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -307,13 +342,25 @@ class ProjectPersistenceMixin:
                     item.crop_rect = crop
                     item.update()
             else:
-                if not self.canvas.add_video(src, show_controls=False):
+                if portable:
+                    # Use the archive-local name, not the extracted temp path.
+                    poster_name = 'videos/' + Path(src).name
+                    content = embedded_posters.get(poster_name)
+                    if content:
+                        poster_cache.install_bytes(src, content)
+                if not self.canvas.add_video(src, show_controls=False, record_undo=False):
                     missing.append(src)
                     continue
-                item = self.canvas.selected_videos()[0]
+                item = self.canvas._last_added_video
+                display_size = record.get("display_size")
+                if display_size is not None:
+                    item.restore_display_size(*display_size)
                 item.loop_a_ms = record["loop_a_ms"]
                 item.loop_b_ms = record["loop_b_ms"]
                 item.set_loop_enabled(record["loop_enabled"])
+                item.set_content_view(zoom=record["content_zoom"],
+                                      pan_x=record["pan_x"], pan_y=record["pan_y"])
+                item.restore_saved_crop(QRectF(*record["crop"]), (1.0, 1.0))
             item.setPos(record["x"], record["y"])
             item.setScale(record["scale"])
             item.setRotation(record["rotation"])
@@ -366,7 +413,55 @@ class ProjectPersistenceMixin:
                 enabled = record.get("loop_enabled", False)
                 if not isinstance(enabled, bool) or (enabled and (a is None or b is None or a >= b)):
                     raise ValueError("Invalid A–B loop state.")
-                item.update(loop_a_ms=a, loop_b_ms=b, loop_enabled=enabled)
+                view = {}
+                for name, default, low, high in (
+                    ("content_zoom", 1.0, 1.0, 4.0),
+                    ("pan_x", 0.0, -5000.0, 5000.0),
+                    ("pan_y", 0.0, -5000.0, 5000.0),
+                ):
+                    value = float(record.get(name, default))
+                    if not math.isfinite(value) or not low <= value <= high:
+                        raise ValueError(f"Invalid video view setting: {name}")
+                    view[name] = value
+                crop = record.get("crop")
+                if crop is not None:
+                    if not isinstance(crop, list) or len(crop) != 4:
+                        raise ValueError("Invalid video crop values.")
+                    crop = [float(v) for v in crop]
+                    if not all(math.isfinite(v) for v in crop):
+                        raise ValueError("Invalid video crop values.")
+                    unit = record.get("crop_unit")
+                    if unit == "relative":
+                        pass
+                    elif unit is None:
+                        # v0.5.1 stored raw coordinates on a 420x236 graphics item.
+                        crop = [crop[0] / 420.0, crop[1] / 236.0,
+                                crop[2] / 420.0, crop[3] / 236.0]
+                    else:
+                        raise ValueError("Unknown video crop unit.")
+                else:
+                    # v0.5.0 stored one symmetric crop inset per edge.
+                    inset = float(record.get("crop_inset", 0.0))
+                    if not math.isfinite(inset) or not 0.0 <= inset <= 0.30:
+                        raise ValueError("Invalid video view setting: crop_inset")
+                    crop = [inset, inset, 1.0 - 2.0 * inset, 1.0 - 2.0 * inset]
+                if (not 0 <= crop[0] < 1 or not 0 <= crop[1] < 1
+                        or not 0 < crop[2] <= 1 or not 0 < crop[3] <= 1
+                        or crop[0] + crop[2] > 1.00001
+                        or crop[1] + crop[3] > 1.00001):
+                    raise ValueError("Video crop exceeds video frame.")
+                display_size = record.get("display_size")
+                if display_size is not None:
+                    if (not isinstance(display_size, list) or len(display_size) != 2
+                            or any(isinstance(v, bool) or not isinstance(v, (int, float))
+                                   for v in display_size)):
+                        raise ValueError("Invalid saved video display dimensions.")
+                    display_size = [float(v) for v in display_size]
+                    if (not all(math.isfinite(v) and 10 <= v <= 10000 for v in display_size)
+                            or not 0.1 <= display_size[0] / display_size[1] <= 10):
+                        raise ValueError("Saved video display dimensions are out of range.")
+                item.update(loop_a_ms=a, loop_b_ms=b, loop_enabled=enabled,
+                            crop=crop, display_size=display_size, **view)
             parsed.append(item)
         return parsed
 

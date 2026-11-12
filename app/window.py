@@ -8,6 +8,7 @@ from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
 from .config import APP_NAME, APP_VERSION, PUBLISHER, COPYRIGHT, WEBSITE, asset_path
 from .canvas import Canvas
+from .shortcut_help import ShortcutHelp
 from .performance import memory_working_set_mb, memory_peak_working_set_mb, memory_private_mb
 from .video_diagnostics import video_lifecycle
 from .project import ProjectPersistenceMixin
@@ -30,6 +31,7 @@ class MontaSpace(ProjectPersistenceMixin, QMainWindow):
         # The viewport covers almost the entire frameless window. Qt delivers
         # most pointer events to it rather than to QMainWindow.
         self._resize_hint = ResizeHint(self.canvas.viewport())
+        self._border_visible = True
         self._resize_hover_edges = Qt.Edge(0)
         self.canvas.setMouseTracking(True)
         self.canvas.viewport().setMouseTracking(True)
@@ -42,6 +44,7 @@ class MontaSpace(ProjectPersistenceMixin, QMainWindow):
         self._embedded_sources = set()
         self._temp_extract = None
         self._saved_snapshot = self.project_snapshot()
+        self._shortcut_help = None
 
         for shortcut, callback in (
             ("Ctrl+N", self.new_project),
@@ -53,9 +56,28 @@ class MontaSpace(ProjectPersistenceMixin, QMainWindow):
             ("Ctrl+Shift+Z", self.perform_redo),
             ("Ctrl+D", self.canvas.duplicate_selected),
             ("Ctrl+A", self.select_all),
+            ("F1", self.toggle_shortcut_help),
+            ("Ctrl+H", self.toggle_shortcut_help),
+            ("Ctrl+Shift+B", self.toggle_whiteboard_border),
         ):
             key = QShortcut(QKeySequence(shortcut), self)
             key.activated.connect(callback)
+
+    def toggle_shortcut_help(self):
+        """Show/hide a separate non-modal reference, without pausing media."""
+        if self._shortcut_help is None:
+            self._shortcut_help = ShortcutHelp(self)
+        if self._shortcut_help.isVisible():
+            self._shortcut_help.hide()
+        else:
+            self._shortcut_help.show()
+            self._shortcut_help.raise_()
+            self._shortcut_help.activateWindow()
+
+    def toggle_whiteboard_border(self):
+        """Toggle the subtle always-on frameless window boundary."""
+        self._border_visible = not self._border_visible
+        self._resize_hint.set_border_visible(self._border_visible)
 
     def show_about(self):
         """Display version and publisher attribution."""
@@ -105,7 +127,10 @@ class MontaSpace(ProjectPersistenceMixin, QMainWindow):
             f"Current process private committed memory: {fmt(private)}\n"
             f"Peak process working set: {fmt(peak)}\n"
             f"Undo entries: {self.undo_stack.count()}\n\n"
-            f"{video_lifecycle.report()}\n\n"
+            f"Video geometry (read-only):\n"
+            + ("\n".join(f"  {video.geometry_report()}" for video in videos) if videos else "  none")
+            + "\n\n"
+            + f"{video_lifecycle.report()}\n\n"
             "Qt alive counts are native C++ QObject counts. Zero alive video "
             "objects with high RAM can indicate retained decoder buffers, "
             "allocators, or other native memory (not proof of a leak). "

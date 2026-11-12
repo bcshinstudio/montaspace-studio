@@ -1,6 +1,7 @@
 """Whiteboard scene, selections, manipulation, drag/drop, and context menus."""
 from pathlib import Path
-from PySide6.QtCore import Qt, QRectF
+from uuid import uuid4
+from PySide6.QtCore import Qt, QRectF, QLineF
 from PySide6.QtGui import QColor, QBrush, QPainter
 from PySide6.QtWidgets import QFileDialog, QGraphicsScene, QGraphicsView, QMenu
 from .config import IMAGE_FILTER, SUPPORTED_EXTENSIONS, VIDEO_FILTER, VIDEO_EXTENSIONS
@@ -31,25 +32,62 @@ class Canvas(QGraphicsView):
         self._crop_previous_z = None
         self._crop_disabled_items = []
         self._restoring = False
+        self._panning_video = None
+        self._pan_last_scene = None
+        self._last_added_video = None
+        self._grip_drag = None
+        self._pan_undo_before = None
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        hint = getattr(self.window, "_resize_hint", None)
+        if hint is not None and (hint.border_visible or hint.edges):
+            painter = QPainter(self.viewport())
+            hint.paint(painter)
+            painter.end()
 
     def capture_state(self):
-        """Immutable metadata for active items (pixmaps remain shared in memory)."""
-        return tuple(
+        """One ordered photo/video history, with no video frames or Qt players.
+
+        Photos retain their existing implicitly shared pixmaps via ImageItem.
+        Videos use only their ID, file path, and scalar editing settings.
+        Removed videos are recreated on undo, never kept alive off-screen.
+        """
+        photos = tuple(
             (item, item.pos().x(), item.pos().y(), item.scale(), item.rotation(),
-             tuple((item.crop_rect.x(), item.crop_rect.y(),
-                    item.crop_rect.width(), item.crop_rect.height())), item.zValue())
+             (item.crop_rect.x(), item.crop_rect.y(),
+              item.crop_rect.width(), item.crop_rect.height()), item.zValue())
             for item in self.image_stack()
         )
+        videos = []
+        for item in self.video_items():
+            rect = item.crop_rect
+            bounds = item.base_rect()
+            if bounds.width() <= 0 or bounds.height() <= 0:
+                continue
+            crop = (rect.x() / bounds.width(), rect.y() / bounds.height(),
+                    rect.width() / bounds.width(), rect.height() / bounds.height())
+            videos.append((
+                item.history_id, item.filename,
+                item.pos().x(), item.pos().y(), item.scale(), item.rotation(),
+                item.zValue(), crop,
+                item.content_zoom,
+                item.pan_x / bounds.width(), item.pan_y / bounds.height(),
+                item.loop_a_ms, item.loop_b_ms, item.loop_enabled,
+                tuple(item.verified_display_size() or ()),
+            ))
+        return photos, tuple(sorted(videos, key=lambda entry: entry[0]))
 
     def restore_state(self, state):
         self._restoring = True
         try:
             self.finish_crop(False)
-            desired = {entry[0] for entry in state}
+            photos, videos = state
+            desired = {entry[0] for entry in photos}
             for item in list(self.image_stack()):
                 if item not in desired:
                     self.scene_area.removeItem(item)
-            for item, x, y, scale, angle, crop, z in state:
+            for item, x, y, scale, angle, crop, z in photos:
                 if item.scene() is None:
                     self.scene_area.addItem(item)
                 item.setPos(x, y)
@@ -57,10 +95,52 @@ class Canvas(QGraphicsView):
                 item.setRotation(angle)
                 item.crop_rect = QRectF(*crop)
                 item.setZValue(z)
+                item._refresh_handles()
                 item.update()
+
+            # Video history stores no QObject references: deleted items can
+            # release their decoders immediately; Undo recreates on demand.
+            requested = {entry[0] for entry in videos}
+            current = {item.history_id: item for item in self.video_items()}
+            for key, item in list(current.items()):
+                if key not in requested:
+                    item.release()
+                    self.scene_area.removeItem(item)
+                    item.deleteLater()
+                    del current[key]
+            for (key, path, x, y, scale, angle, z, crop,
+                 zoom, pan_x, pan_y, loop_a, loop_b, loop_on, display_size) in videos:
+                item = current.get(key)
+                if item is None:
+                    if not self.add_video(path, show_controls=False, record_undo=False):
+                        continue  # Source removed externally; don't crash Undo.
+                    item = self._last_added_video
+                    item.history_id = key
+                    current[key] = item
+                if display_size:
+                    item.restore_display_size(*display_size)
+                bounds = item.base_rect()
+                item.setPos(x, y)
+                item.setScale(scale)
+                item.setRotation(angle)
+                item.setZValue(z)
+                item.set_content_view(
+                    zoom=zoom,
+                    crop_rect=QRectF(crop[0] * bounds.width(),
+                                     crop[1] * bounds.height(),
+                                     crop[2] * bounds.width(),
+                                     crop[3] * bounds.height()),
+                    pan_x=pan_x * bounds.width(), pan_y=pan_y * bounds.height(),
+                )
+                item.loop_a_ms = loop_a
+                item.loop_b_ms = loop_b
+                item.set_loop_enabled(loop_on)
+                if item._controls is not None:
+                    item._controls.sync_from_video()
             self.scene_area.clearSelection()
         finally:
             self._restoring = False
+        self.viewport().update()
         self.window.update_modified_title()
 
     def record_edit(self, before, description):
@@ -140,20 +220,26 @@ class Canvas(QGraphicsView):
         for video in self.video_items():
             video.release()
 
-    def add_video(self, filename, scene_pos=None, show_controls=True):
+    def add_video(self, filename, scene_pos=None, show_controls=True, record_undo=True):
         if Path(filename).suffix.lower() not in VIDEO_EXTENSIONS or not Path(filename).is_file():
             return False
+        before = self.capture_state() if record_undo and not self._restoring else None
         item = VideoItem(filename)
+        item.history_id = uuid4().hex
+        self._last_added_video = item
         if scene_pos is None:
             scene_pos = self.mapToScene(self.viewport().rect().center())
         item.setPos(scene_pos)
         item.setZValue(max((i.zValue() for i in self.scene_area.items()), default=0) + 1)
         self.scene_area.addItem(item)
         self.scene_area.clearSelection()
-        item.setSelected(True)
+        # Videos do not show edit handles until the user selects them.
+        # Insertion should not guess the decoded display rectangle.
         self.window.update_modified_title()
         if show_controls:
             item.controls(self.window)
+        if before is not None:
+            self.record_edit(before, "Insert video")
         return True
 
     def insert_video(self):
@@ -165,7 +251,7 @@ class Canvas(QGraphicsView):
         return [i for i in self.scene_area.selectedItems() if isinstance(i, ImageItem)]
 
     def begin_crop(self, item):
-        """Keep the edited image above others and route input to it."""
+        """Keep the edited item above others and route input to it."""
         if self.active_crop is item:
             return
         if self.active_crop is not None:
@@ -177,14 +263,14 @@ class Canvas(QGraphicsView):
         self.active_crop = item
         self._crop_previous_z = item.zValue()
 
-        # The crop handles must always be above overlapping photos.
+        # The crop handles must always be above overlapping media.
         max_z = max((i.zValue() for i in self.scene_area.items()), default=0)
         item.setZValue(max_z + 1)
 
-        # Prevent any other photo from intercepting crop-handle clicks.
+        # Prevent any other media from intercepting crop-handle clicks.
         self._crop_disabled_items = []
         for other in self.scene_area.items():
-            if isinstance(other, ImageItem) and other is not item:
+            if isinstance(other, (ImageItem, VideoItem)) and other is not item:
                 self._crop_disabled_items.append(
                     (other, other.acceptedMouseButtons(), other.acceptHoverEvents())
                 )
@@ -216,7 +302,9 @@ class Canvas(QGraphicsView):
         self.scene_area.clearSelection()
         item.setSelected(True)
         if apply and before_crop is not None:
-            self.record_edit(before_crop, "Crop image")
+            self.record_edit(before_crop, "Crop image" if isinstance(item, ImageItem) else "Crop video")
+        else:
+            self.window.update_modified_title()
         self._before_crop_state = None
 
     def delete_selected_items(self):
@@ -231,7 +319,7 @@ class Canvas(QGraphicsView):
             else:
                 self.scene_area.removeItem(item)
         self.window.update_modified_title()
-        self.record_edit(before, "Delete image")
+        self.record_edit(before, "Delete media")
 
     def _video_at_view_pos(self, pos):
         """Resolve a video beneath the pointer, including its placeholder children."""
@@ -240,18 +328,21 @@ class Canvas(QGraphicsView):
             item = hit
             while item is not None and not isinstance(item, VideoItem):
                 item = item.parentItem()
-            if isinstance(item, VideoItem) and item.boundingRect().contains(item.mapFromScene(point)):
+            if isinstance(item, VideoItem) and item.contains(item.mapFromScene(point)):
                 return item
         return None
 
     def mouseDoubleClickEvent(self, event):
-        """Double-left-click videos to play/pause; retain photo double-click crop."""
+        """Photos keep double-click crop; videos use Ctrl+double-click for crop."""
         if event.button() == Qt.MouseButton.LeftButton and not self.active_crop:
             video = self._video_at_view_pos(event.position().toPoint())
             if video is not None:
                 self.scene_area.clearSelection()
                 video.setSelected(True)
-                video.toggle_playback()
+                if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                    self.begin_crop(video)
+                else:
+                    video.toggle_playback()
                 event.accept()
                 return
         item = self.itemAt(event.position().toPoint())
@@ -339,7 +430,7 @@ class Canvas(QGraphicsView):
                 if isinstance(item, ImageItem):
                     hit = item.crop_rect.contains(item.mapFromScene(scene_point))
                 elif isinstance(item, VideoItem):
-                    hit = item.boundingRect().contains(item.mapFromScene(scene_point))
+                    hit = item.contains(item.mapFromScene(scene_point))
                 else:
                     continue
                 if hit:
@@ -349,6 +440,24 @@ class Canvas(QGraphicsView):
                     break
 
         menu = QMenu(self)
+        menu.setStyleSheet("""
+            QMenu {
+                background: #ffffff;
+                color: #1f2937;
+                border: 1px solid #d9e0e8;
+                border-radius: 7px;
+                padding: 5px 0;
+                font: 10pt 'Segoe UI';
+            }
+            QMenu::item { padding: 7px 24px 7px 14px; }
+            QMenu::item:selected { background: #eef4fd; color: #174f9b; }
+            QMenu::item:disabled { color: #9ca3af; }
+            QMenu::separator {
+                background: #e6eaf0;
+                height: 1px;
+                margin: 5px 10px;
+            }
+        """)
         if self.active_crop:
             apply_action = menu.addAction("Apply Crop (Enter)")
             cancel_action = menu.addAction("Cancel Crop (Esc)")
@@ -360,13 +469,13 @@ class Canvas(QGraphicsView):
             return
 
         file_menu = menu.addMenu("File")
-        new_action = file_menu.addAction("New                  Ctrl+N")
-        open_action = file_menu.addAction("Open...              Ctrl+O")
-        save_action = file_menu.addAction("Save                 Ctrl+S")
-        save_as_action = file_menu.addAction("Save As...        Ctrl+Shift+S")
+        new_action = file_menu.addAction("New\tCtrl+N")
+        open_action = file_menu.addAction("Open…\tCtrl+O")
+        save_action = file_menu.addAction("Save\tCtrl+S")
+        save_as_action = file_menu.addAction("Save As…\tCtrl+Shift+S")
         menu.addSeparator()
-        undo_action = menu.addAction("Undo                  Ctrl+Z")
-        redo_action = menu.addAction("Redo                  Ctrl+Y")
+        undo_action = menu.addAction("Undo\tCtrl+Z")
+        redo_action = menu.addAction("Redo\tCtrl+Y")
         undo_action.setEnabled(self.window.undo_stack.canUndo())
         redo_action.setEnabled(self.window.undo_stack.canRedo())
         menu.addSeparator()
@@ -399,13 +508,17 @@ class Canvas(QGraphicsView):
         selected = self.selected_images()
         selected_videos = self.selected_videos()
         video_actions = {}
+        video_crop_actions = {}
         for video in self.video_items():
-            if video.sceneBoundingRect().contains(self.mapToScene(event.pos())):
+            if video.contains(video.mapFromScene(self.mapToScene(event.pos()))):
                 video_menu = menu.addMenu("Video Here: " + Path(video.filename).name)
                 video_actions[video_menu.addAction("Playback Controls...")] = video
+                video_crop_actions[video_menu.addAction("Crop Video")] = video
                 break
         if selected_videos:
             video_actions[menu.addAction("Selected Video — Playback Controls...")] = selected_videos[0]
+            if len(selected_videos) == 1:
+                video_crop_actions[menu.addAction("Selected Video — Crop Video")] = selected_videos[0]
         if len(selected) == 1:
             active = selected[0]
             selected_menu = menu.addMenu("Selected Image")
@@ -414,8 +527,8 @@ class Canvas(QGraphicsView):
             selected_menu.addSeparator()
             self.add_arrange_actions(selected_menu, active, arrange_actions)
 
-        duplicate_action = menu.addAction("Duplicate Selected    Ctrl+D") if selected else None
-        select_all_action = menu.addAction("Select All            Ctrl+A")
+        duplicate_action = menu.addAction("Duplicate Selected\tCtrl+D") if selected else None
+        select_all_action = menu.addAction("Select All\tCtrl+A")
         delete_action = menu.addAction("Delete Selected") if selected or selected_videos else None
         menu.addSeparator()
         performance_action = menu.addAction("Performance Info...")
@@ -442,6 +555,8 @@ class Canvas(QGraphicsView):
             self.insert_video()
         elif chosen in video_actions:
             video_actions[chosen].controls(self.window)
+        elif chosen in video_crop_actions:
+            self.begin_crop(video_crop_actions[chosen])
         elif chosen == duplicate_action:
             self.duplicate_selected()
         elif chosen == select_all_action:
@@ -504,7 +619,7 @@ class Canvas(QGraphicsView):
             for item in self.selected_images() + self.selected_videos():
                 item.setScale(max(item.MIN_SCALE, min(item.MAX_SCALE, item.scale() * factor)))
             self.window.update_modified_title()
-            self.record_edit(before, "Resize image")
+            self.record_edit(before, "Resize media")
             event.accept()
         else:
             event.ignore()
@@ -525,14 +640,185 @@ class Canvas(QGraphicsView):
             return
         super().keyPressEvent(event)
 
+    @staticmethod
+    def _cursor_for_grip(grip):
+        return {
+            "tl": Qt.CursorShape.SizeFDiagCursor,
+            "br": Qt.CursorShape.SizeFDiagCursor,
+            "tr": Qt.CursorShape.SizeBDiagCursor,
+            "bl": Qt.CursorShape.SizeBDiagCursor,
+            "left": Qt.CursorShape.SizeHorCursor,
+            "right": Qt.CursorShape.SizeHorCursor,
+            "top": Qt.CursorShape.SizeVerCursor,
+            "bottom": Qt.CursorShape.SizeVerCursor,
+            "rotate": Qt.CursorShape.CrossCursor,
+        }.get(grip)
+
+    def _selected_grip_at(self, viewport_pos):
+        """Single source of truth for cursor AND mouse-press hit-testing.
+
+        QGraphicsScene may route presses to a different item than the one that
+        generated the hover cursor. Handle grabs belong to the view instead.
+        """
+        scene_point = self.mapToScene(viewport_pos)
+        selected = [item for item in self.scene_area.selectedItems()
+                    if isinstance(item, (ImageItem, VideoItem))]
+        # Frontmost selected item wins when two selections overlap.
+        selected.sort(key=lambda item: item.zValue(), reverse=True)
+        for item in selected:
+            grip = item.handle_at(item.mapFromScene(scene_point))
+            if grip is not None:
+                return item, grip
+        return None, None
+
+    def _begin_grip_drag(self, item, grip, scene_point):
+        """Capture existing photo/video crop and resize state once per drag."""
+        local = item.mapFromScene(scene_point)
+        state = {
+            "item": item, "grip": grip, "start_local": local,
+            "start_crop": QRectF(item.crop_rect),
+            "start_scale": item.scale(),
+            "start_distance": max(QLineF(
+                item.mapToScene(item.transformOriginPoint()), scene_point
+            ).length(), 1.0),
+            "before": self.capture_state(),
+        }
+        if grip == "rotate" and isinstance(item, ImageItem) and not item.crop_mode:
+            line = QLineF(item.mapToScene(item.transformOriginPoint()), scene_point)
+            state["start_angle"] = line.angle()
+            state["start_rotation"] = item.rotation()
+        self._grip_drag = state
+        self.setFocus()
+
+    def _move_grip_drag(self, scene_point):
+        state = self._grip_drag
+        item, grip = state["item"], state["grip"]
+        if grip == "rotate":
+            line = QLineF(item.mapToScene(item.transformOriginPoint()), scene_point)
+            item.setRotation(state["start_rotation"] + state["start_angle"] - line.angle())
+            return
+
+        if not item.crop_mode:
+            line = QLineF(item.mapToScene(item.transformOriginPoint()), scene_point)
+            new_scale = state["start_scale"] * max(line.length(), 1.0) / state["start_distance"]
+            item.setScale(max(item.MIN_SCALE, min(item.MAX_SCALE, new_scale)))
+            return
+
+        # Crop distances use the item's original local coordinates, preserving
+        # photo and video semantics even when the item is rotated or scaled.
+        local = item.mapFromScene(scene_point)
+        dx = local.x() - state["start_local"].x()
+        dy = local.y() - state["start_local"].y()
+        initial = state["start_crop"]
+        left, right = initial.left(), initial.right()
+        top, bottom = initial.top(), initial.bottom()
+        bounds = item.full_rect if isinstance(item, ImageItem) else item.base_rect()
+        if grip in ("tl", "bl", "left"):
+            left = min(max(left + dx, bounds.left()), right - item.MIN_CROP)
+        if grip in ("tr", "br", "right"):
+            right = max(min(right + dx, bounds.right()), left + item.MIN_CROP)
+        if grip in ("tl", "tr", "top"):
+            top = min(max(top + dy, bounds.top()), bottom - item.MIN_CROP)
+        if grip in ("bl", "br", "bottom"):
+            bottom = max(min(bottom + dy, bounds.bottom()), top + item.MIN_CROP)
+        item.crop_rect = QRectF(left, top, right - left, bottom - top)
+        if isinstance(item, ImageItem):
+            item._refresh_handles()
+        else:
+            item._clamp_pan()
+            item._refresh_placeholder_geometry()
+            item._refresh_selection_geometry()
+        item.update()
+        # The native video paint path can require a viewport repaint after
+        # moving crop boundaries; this happens only while actively dragging.
+        if isinstance(item, VideoItem):
+            self.viewport().update()
+
+    def _end_grip_drag(self):
+        state = self._grip_drag
+        self._grip_drag = None
+        if state is None:
+            return
+        item = state["item"]
+        if not item.crop_mode:
+            self.record_edit(state["before"], "Resize or rotate media")
+        else:
+            self.window.update_modified_title()
+
     def mouseMoveEvent(self, event):
+        if self._grip_drag is not None:
+            self._move_grip_drag(self.mapToScene(event.position().toPoint()))
+            event.accept()
+            return
+        if self._panning_video is not None:
+            video = self._panning_video
+            point = video.mapFromScene(self.mapToScene(event.position().toPoint()))
+            delta = point - self._pan_last_scene
+            video.set_content_view(pan_x=video.pan_x + delta.x(),
+                                   pan_y=video.pan_y + delta.y())
+            self._pan_last_scene = point
+            self.window.update_modified_title()
+            event.accept()
+            return
         super().mouseMoveEvent(event)
         # Scene items may change the pointer shape during their hover handling.
         # Window borders should still advertise their resize affordance.
         window_pos = self.mapTo(self.window, event.position().toPoint())
         self.window.update_resize_hover(window_pos)
+        # QGraphicsVideoItem/child paint overlays can steal hover events on
+        # Windows. Resolve the cursor at the *view* too, so the whole edge
+        # shows the expected two-direction arrow even between square handles.
+        if not self.window.resize_edges(window_pos) and self._panning_video is None:
+            _item, grip = self._selected_grip_at(event.position().toPoint())
+            shape = self._cursor_for_grip(grip)
+            if shape is not None:
+                self.viewport().setCursor(shape)
+            else:
+                self.viewport().unsetCursor()
+
+    def mouseReleaseEvent(self, event):
+        if self._grip_drag is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._end_grip_drag()
+            event.accept()
+            return
+        if self._panning_video is not None and event.button() == Qt.MouseButton.LeftButton:
+            self._panning_video = None
+            self._pan_last_scene = None
+            before = getattr(self, "_pan_undo_before", None)
+            self._pan_undo_before = None
+            if before is not None:
+                self.record_edit(before, "Pan video")
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def mousePressEvent(self, event):
+        # Use exactly the same hit-test as the displayed cursor. This also
+        # handles the invisible grab zone outside the item's scene shape.
+        if event.button() == Qt.MouseButton.LeftButton and not (
+                event.modifiers() & (Qt.KeyboardModifier.ShiftModifier | Qt.KeyboardModifier.AltModifier)):
+            viewport_pos = event.position().toPoint()
+            window_pos = self.mapTo(self.window, viewport_pos)
+            if not self.window.resize_edges(window_pos):
+                item, grip = self._selected_grip_at(viewport_pos)
+                if item is not None and grip is not None:
+                    self._begin_grip_drag(item, grip, self.mapToScene(viewport_pos))
+                    event.accept()
+                    return
+        # Shift+left-drag pans the CONTENT only; plain dragging still moves video.
+        if (event.button() == Qt.MouseButton.LeftButton
+                and event.modifiers() & Qt.KeyboardModifier.ShiftModifier
+                and not self.active_crop):
+            video = self._video_at_view_pos(event.position().toPoint())
+            if video is not None and video.content_zoom > 1.0:
+                self.scene_area.clearSelection()
+                video.setSelected(True)
+                self._pan_undo_before = self.capture_state()
+                self._panning_video = video
+                self._pan_last_scene = video.mapFromScene(
+                    self.mapToScene(event.position().toPoint()))
+                event.accept()
+                return
         # Middle-click on a video toggles the existing non-modal control dialog.
         # Empty-whiteboard and photo middle-clicks retain their previous behavior.
         if event.button() == Qt.MouseButton.MiddleButton and not self.active_crop:

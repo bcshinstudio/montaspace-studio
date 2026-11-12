@@ -5,7 +5,6 @@ within the resize zone, and never intercepts image editing or drag-and-drop.
 """
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QWidget
 
 
 EDGE_MARGIN = 12
@@ -50,62 +49,74 @@ def resize_cursor(edges):
     return Qt.CursorShape.SizeHorCursor if horizontal else Qt.CursorShape.SizeVerCursor
 
 
-class ResizeHint(QWidget):
-    """Thin blue line near the hovered window border; never consumes input."""
+class ResizeHint:
+    """Draw a quiet boundary on the *existing* viewport paint surface.
+
+    v0.5.12 used a window-sized transparent child QWidget, which could leave
+    blank rectangles on Windows at startup. This object owns no native window,
+    and its paint() is called by Canvas.paintEvent after scene rendering.
+    """
 
     def __init__(self, viewport):
-        super().__init__(viewport)
+        self.viewport = viewport
         self.edges = Qt.Edge(0)
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
-        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
-        self.hide()
+        self.border_visible = True
+
+    def setGeometry(self, _rect):
+        # Compatibility with the existing window resize-event handling.
+        pass
+
+    def set_border_visible(self, visible):
+        if self.border_visible != bool(visible):
+            self.border_visible = bool(visible)
+            self.viewport.update()
 
     def show_edges(self, edges):
-        if edges == self.edges:
-            return
-        self.edges = edges
-        if edges:
-            self.setGeometry(self.parentWidget().rect())
-            self.show()
-            self.raise_()
-            self.update()
-        else:
-            self.hide()
+        if edges != self.edges:
+            self.edges = edges
+            self.viewport.update()
 
-    def paintEvent(self, event):
-        if not self.edges:
+    def paint(self, painter):
+        if not self.edges and not self.border_visible:
             return
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-        pen = QPen(QColor(40, 145, 185, 200), 3)
-        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        painter.setPen(pen)
-        extent = 32
-        left = 3
-        right = self.width() - 4
-        top = 3
-        bottom = self.height() - 4
-        e = self.edges
-        # Draw a quiet short line at the engaged edge/corner, not a permanent frame.
-        if (e & Qt.Edge.LeftEdge) and (e & Qt.Edge.TopEdge):
-            painter.drawLine(left, top, left + extent, top)
-            painter.drawLine(left, top, left, top + extent)
-        elif (e & Qt.Edge.RightEdge) and (e & Qt.Edge.TopEdge):
-            painter.drawLine(right - extent, top, right, top)
-            painter.drawLine(right, top, right, top + extent)
-        elif (e & Qt.Edge.LeftEdge) and (e & Qt.Edge.BottomEdge):
-            painter.drawLine(left, bottom - extent, left, bottom)
-            painter.drawLine(left, bottom, left + extent, bottom)
-        elif (e & Qt.Edge.RightEdge) and (e & Qt.Edge.BottomEdge):
-            painter.drawLine(right, bottom - extent, right, bottom)
-            painter.drawLine(right - extent, bottom, right, bottom)
-        elif e & Qt.Edge.LeftEdge:
-            painter.drawLine(left, self.height() // 2 - extent, left, self.height() // 2 + extent)
-        elif e & Qt.Edge.RightEdge:
-            painter.drawLine(right, self.height() // 2 - extent, right, self.height() // 2 + extent)
-        elif e & Qt.Edge.TopEdge:
-            painter.drawLine(self.width() // 2 - extent, top, self.width() // 2 + extent, top)
-        elif e & Qt.Edge.BottomEdge:
-            painter.drawLine(self.width() // 2 - extent, bottom, self.width() // 2 + extent, bottom)
-        painter.end()
+        rect = self.viewport.rect()
+        width, height = rect.width(), rect.height()
+        if not width or not height:
+            return
+        painter.save()
+        if self.border_visible:
+            pen = QPen(QColor(99, 127, 154, 130))
+            pen.setWidthF(1.0)
+            pen.setCosmetic(True)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRect(rect.adjusted(0, 0, -1, -1))
+        if self.edges:
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            pen = QPen(QColor(40, 145, 185, 200), 3)
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            extent = 32
+            left, right, top, bottom = 3, width - 4, 3, height - 4
+            e = self.edges
+            if (e & Qt.Edge.LeftEdge) and (e & Qt.Edge.TopEdge):
+                painter.drawLine(left, top, left + extent, top)
+                painter.drawLine(left, top, left, top + extent)
+            elif (e & Qt.Edge.RightEdge) and (e & Qt.Edge.TopEdge):
+                painter.drawLine(right - extent, top, right, top)
+                painter.drawLine(right, top, right, top + extent)
+            elif (e & Qt.Edge.LeftEdge) and (e & Qt.Edge.BottomEdge):
+                painter.drawLine(left, bottom - extent, left, bottom)
+                painter.drawLine(left, bottom, left + extent, bottom)
+            elif (e & Qt.Edge.RightEdge) and (e & Qt.Edge.BottomEdge):
+                painter.drawLine(right, bottom - extent, right, bottom)
+                painter.drawLine(right - extent, bottom, right, bottom)
+            elif e & Qt.Edge.LeftEdge:
+                painter.drawLine(left, height // 2 - extent, left, height // 2 + extent)
+            elif e & Qt.Edge.RightEdge:
+                painter.drawLine(right, height // 2 - extent, right, height // 2 + extent)
+            elif e & Qt.Edge.TopEdge:
+                painter.drawLine(width // 2 - extent, top, width // 2 + extent, top)
+            elif e & Qt.Edge.BottomEdge:
+                painter.drawLine(width // 2 - extent, bottom, width // 2 + extent, bottom)
+        painter.restore()
