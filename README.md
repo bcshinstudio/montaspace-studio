@@ -1,4 +1,4 @@
-# MontaSpace Studio v0.5.20
+# MontaSpace Studio v0.5.23
 
 **MontaSpace Studio** is a lightweight, frameless Windows whiteboard for arranging photos and videos, by **BC Shin Studio**. It is a separate application from the photo-only MontaSpace.
 
@@ -60,7 +60,7 @@ Automated tests cover algorithms and source-level contracts; they do not replace
 ## Windows packaging
 
 - `build_windows.bat` — builds the PyInstaller one-directory app.
-- `build_installer.bat` — builds the app and the free NSIS installer (`installer-output/MontaSpaceStudio_Setup_0.5.20.exe`).
+- `build_installer.bat` — builds the app and the free NSIS installer (`installer-output/MontaSpaceStudio_Setup_0.5.23.exe`).
 - The scripts expect a project-local `.venv` and required packaging tools.
 - Generated `build/`, `dist/`, `installer-output/` and `.venv/` are ignored by Git.
 
@@ -73,3 +73,39 @@ Automated tests cover algorithms and source-level contracts; they do not replace
 - `installer/` — NSIS installer recipe.
 
 Historical implementation notes and release changes: [`docs/RELEASE_NOTES_v0.4.2_to_v0.5.20.md`](docs/RELEASE_NOTES_v0.4.2_to_v0.5.20.md).
+
+
+## v0.5.21 — Stability and performance verification
+
+This update adds optional testing tools only, without changing photo/video
+behavior. See `docs/VIDEO_V0_5_21_STABILITY_PLAN.md`.
+
+Run `run_video_stability_test.bat "C:\path\to\sample.mp4"` to measure
+5/10/20 video tiles and linked-project save/open behavior.
+
+
+## v0.5.23 — Loop-seek guard and diagnostics
+
+- Ensures at most one pending A/B seek across asynchronous Qt position and end-of-media signals.
+- Per-video seek request/confirmation/suppression counters in Performance Info.
+- No multimedia backend, project schema, or thumbnail changes.
+- Test instructions: `docs/VIDEO_V0_5_22_LOOP_SEEK_TESTS.md`.
+
+
+## v0.5.23 — Software decoding stability candidate
+
+- On Windows, Qt FFmpeg software decoding is enabled **before Qt imports** for regular launches and installers.
+- Native GPU decoding is available for troubleshooting by running `set MONTASPACE_STUDIO_DECODER=hardware` before launching `main.py`. Use `set MONTASPACE_STUDIO_DECODER=` to restore the default.
+- The `QT_FFMPEG_DECODING_HW_DEVICE_TYPES` environment variable, if explicitly present, is respected in automatic mode.
+- Mac/non-Windows platforms retain Qt's normal default.
+- No changes to existing video editing/playback/thumbnail/project classes.
+- `run_studio_loop_test.bat "C:\path\clip.mp4"` tests **the actual whiteboard** with five simultaneous loops, saving CSV and JSON under `Documents\MontaSpaceStudio_Test_Reports`. It runs five minutes and exits automatically. Optional: `--seconds 180`, `--decoder hardware`, or `--count 1`.
+- The benchmark's temporary whiteboard never saves a project and does not modify the MP4. For safety, it stops if private memory reaches 6 GB.
+- **Not a confirmed fix until real Windows comparison**: measure private memory at 1 and 5 minutes, CPU use and video behavior.
+
+## Automated regression tests (v0.5.23 baseline)
+
+Before committing changes, run `run_regression_tests.bat` from the project folder.
+It checks the existing logic tests and real Qt whiteboard operations with
+small bundled/temporary media. See `docs/AUTOMATED_REGRESSION_TESTS.md`.
+The automated playback memory test is separate: `run_studio_loop_test.bat "video.mp4"`.

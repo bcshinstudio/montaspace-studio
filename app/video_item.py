@@ -25,6 +25,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer, QMediaMetaData
 from PySide6.QtMultimediaWidgets import QGraphicsVideoItem
 from .video_diagnostics import video_lifecycle
+from .loop_seek import LoopSeekGuard
 from .video_geometry import effective_frame_size, fit_video_size
 from .edit_handles import EditHandles, crop_anchors
 from .edge_hit import hit_rect_edge
@@ -141,7 +142,7 @@ class VideoItem(QGraphicsVideoItem):
         self.loop_a_ms = None
         self.loop_b_ms = None
         self.loop_enabled = False
-        self._loop_guard = False
+        self._loop_seek = LoopSeekGuard()
         self._released = False
         self.history_id = None  # Assigned by Canvas; never stored as a QObject in Undo.
         self._move_undo_before = None
@@ -324,7 +325,8 @@ class VideoItem(QGraphicsVideoItem):
                 f"crop=({rect.x():.1f},{rect.y():.1f},"
                 f"{rect.width():.1f},{rect.height():.1f}), "
                 f"crop_mode={self.crop_mode}, "
-                f"geometry_locked={self._frame_geometry_locked}")
+                f"geometry_locked={self._frame_geometry_locked}, "
+                f"{self._loop_seek.report()}")
 
     def _set_poster(self, pixmap):
         """Show an already cached low-resolution image (never start playback)."""
@@ -734,6 +736,7 @@ class VideoItem(QGraphicsVideoItem):
         self._released = True
         video_lifecycle.mark_release(self._diagnostic_token)
         self.loop_enabled = False
+        self._loop_seek.reset()
 
         if self._controls is not None:
             dialog = self._controls
@@ -769,42 +772,49 @@ class VideoItem(QGraphicsVideoItem):
         )
 
     def set_loop_a(self, value_ms):
+        self._loop_seek.reset()
         self.loop_a_ms = max(0, int(value_ms))
         if self.loop_b_ms is not None and self.loop_b_ms <= self.loop_a_ms:
             self.loop_enabled = False
 
     def set_loop_b(self, value_ms):
+        self._loop_seek.reset()
         self.loop_b_ms = max(0, int(value_ms))
         if self.loop_a_ms is not None and self.loop_b_ms <= self.loop_a_ms:
             self.loop_enabled = False
 
     def clear_loop(self):
+        self._loop_seek.reset()
         self.loop_a_ms = None
         self.loop_b_ms = None
         self.loop_enabled = False
 
     def set_loop_enabled(self, enabled):
+        self._loop_seek.reset()
         self.loop_enabled = bool(enabled) and self.has_valid_loop()
 
     def _jump_to_loop_start(self):
-        if not (self.loop_enabled and self.has_valid_loop()) or self._loop_guard:
+        """Perform an already-authorized loop seek; never issue a second one."""
+        if self._released or not (self.loop_enabled and self.has_valid_loop()):
             return
-        self._loop_guard = True
-        try:
-            self.player.setPosition(self.loop_a_ms)
-            if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
-                self.player.play()
-        finally:
-            self._loop_guard = False
+        self.player.setPosition(self.loop_a_ms)
+        if self.player.playbackState() != QMediaPlayer.PlaybackState.PlayingState:
+            self.player.play()
 
     def _handle_position_changed(self, pos):
-        if not (self.loop_enabled and self.has_valid_loop()):
+        if self._released:
             return
-        if pos >= self.loop_b_ms - 40:
+        if self._loop_seek.observe_position(
+                pos, self.loop_a_ms, self.loop_b_ms,
+                self.loop_enabled and self.has_valid_loop()):
             self._jump_to_loop_start()
 
     def _handle_media_status(self, status):
-        if status == QMediaPlayer.MediaStatus.EndOfMedia and self.loop_enabled and self.has_valid_loop():
+        if self._released:
+            return
+        if status == QMediaPlayer.MediaStatus.EndOfMedia and self._loop_seek.observe_end(
+                self.player.position(), self.loop_a_ms, self.loop_b_ms,
+                self.loop_enabled and self.has_valid_loop()):
             self._jump_to_loop_start()
 
 
