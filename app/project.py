@@ -61,6 +61,8 @@ class ProjectPersistenceMixin:
                 "loop_a_ms": video.loop_a_ms,
                 "loop_b_ms": video.loop_b_ms,
                 "loop_enabled": video.loop_enabled,
+                "volume": video.volume_percent,
+                "muted": video.muted,
                 "content_zoom": video.content_zoom,
                 "crop": crop_fraction,
                 "crop_unit": "relative",
@@ -392,6 +394,7 @@ class ProjectPersistenceMixin:
                 item.loop_a_ms = record["loop_a_ms"]
                 item.loop_b_ms = record["loop_b_ms"]
                 item.set_loop_enabled(record["loop_enabled"])
+                item.set_audio_state(volume=record["volume"], muted=record["muted"])
                 item.set_content_view(zoom=record["content_zoom"],
                                       pan_x=record["pan_x"], pan_y=record["pan_y"])
                 item.restore_saved_crop(QRectF(*record["crop"]), (1.0, 1.0))
@@ -454,6 +457,12 @@ class ProjectPersistenceMixin:
                 enabled = record.get("loop_enabled", False)
                 if not isinstance(enabled, bool) or (enabled and (a is None or b is None or a >= b)):
                     raise ValueError("Invalid A–B loop state.")
+                volume = record.get("volume", 65)  # v0.6.0 projects lack audio fields.
+                muted = record.get("muted", False)
+                if isinstance(volume, bool) or not isinstance(volume, int) or not 0 <= volume <= 100:
+                    raise ValueError("Invalid video volume; expected 0–100 percent.")
+                if not isinstance(muted, bool):
+                    raise ValueError("Invalid video mute state.")
                 view = {}
                 for name, default, low, high in (
                     ("content_zoom", 1.0, 1.0, 4.0),
@@ -502,6 +511,7 @@ class ProjectPersistenceMixin:
                             or not 0.1 <= display_size[0] / display_size[1] <= 10):
                         raise ValueError("Saved video display dimensions are out of range.")
                 item.update(loop_a_ms=a, loop_b_ms=b, loop_enabled=enabled,
+                            volume=volume, muted=muted,
                             crop=crop, display_size=display_size, **view)
             parsed.append(item)
         return parsed

@@ -63,6 +63,58 @@ class RealWhiteboardRegression(unittest.TestCase):
         self.assertTrue(self.board.canvas.add_video(str(self.video_file), scene_pos=QPointF(80, 90), show_controls=False))
         return self.board.canvas._last_added_video
 
+
+    def test_independent_video_audio_and_undo_redo(self):
+        first = self.add_video()
+        second_path = self.root / 'second.mp4'
+        shutil.copyfile(self.video_file, second_path)
+        self.assertTrue(self.board.canvas.add_video(str(second_path), show_controls=False))
+        second = self.board.canvas._last_added_video
+        self.assertEqual(first.volume_percent, 65)
+        self.assertFalse(first.muted)
+        before = self.board.canvas.capture_state()
+        first.set_audio_state(volume=24, muted=True)
+        self.board.canvas.record_edit(before, 'Change audio')
+        self.assertEqual((first.volume_percent, first.muted), (24, True))
+        self.assertEqual((second.volume_percent, second.muted), (65, False))
+        self.assertAlmostEqual(first.audio.volume(), 0.24)
+        self.assertTrue(first.audio.isMuted())
+        self.board.perform_undo()
+        self.assertEqual((first.volume_percent, first.muted), (65, False))
+        self.board.perform_redo()
+        self.assertEqual((first.volume_percent, first.muted), (24, True))
+        self.assertEqual((second.volume_percent, second.muted), (65, False))
+
+    def test_audio_settings_linked_and_portable_roundtrip(self):
+        for suffix in ('.mstudio', '.mstudiopack'):
+            self.board.new_project()
+            item = self.add_video()
+            item.set_audio_state(volume=33, muted=True)
+            target = self.root / ('audio' + suffix)
+            self.assertTrue(self.board._write_project(target))
+            self.assertTrue(self.board._read_project(target))
+            restored = self.board.canvas.video_items()[0]
+            self.assertEqual((restored.volume_percent, restored.muted), (33, True))
+            self.assertAlmostEqual(restored.audio.volume(), .33)
+            self.assertTrue(restored.audio.isMuted())
+
+    def test_audio_old_project_defaults_and_invalid_validation(self):
+        item = self.add_video()
+        destination = self.root / 'old.mstudio'
+        self.assertTrue(self.board._write_project(destination))
+        payload = json.loads(destination.read_text(encoding='utf-8'))
+        payload['items'][0].pop('volume')
+        payload['items'][0].pop('muted')
+        destination.write_text(json.dumps(payload), encoding='utf-8')
+        self.assertTrue(self.board._read_project(destination))
+        restored = self.board.canvas.video_items()[0]
+        self.assertEqual((restored.volume_percent, restored.muted), (65, False))
+        for invalid in (-1, 101, '50', True):
+            payload['items'][0]['volume'] = invalid
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValueError):
+                    self.board._parse_studio_records(payload, destination, False)
+
     def test_photo_insert_and_non_destructive_transform(self):
         photo = self.add_photo()
         photo.setPos(QPointF(95, 115))

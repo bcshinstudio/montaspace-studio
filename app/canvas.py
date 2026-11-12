@@ -75,6 +75,7 @@ class Canvas(QGraphicsView):
                 item.pan_x / bounds.width(), item.pan_y / bounds.height(),
                 item.loop_a_ms, item.loop_b_ms, item.loop_enabled,
                 tuple(item.verified_display_size() or ()),
+                item.volume_percent, item.muted,
             ))
         return photos, tuple(sorted(videos, key=lambda entry: entry[0]))
 
@@ -109,7 +110,8 @@ class Canvas(QGraphicsView):
                     item.deleteLater()
                     del current[key]
             for (key, path, x, y, scale, angle, z, crop,
-                 zoom, pan_x, pan_y, loop_a, loop_b, loop_on, display_size) in videos:
+                 zoom, pan_x, pan_y, loop_a, loop_b, loop_on, display_size,
+                 volume, muted) in videos:
                 item = current.get(key)
                 if item is None:
                     if not self.add_video(path, show_controls=False, record_undo=False):
@@ -135,6 +137,7 @@ class Canvas(QGraphicsView):
                 item.loop_a_ms = loop_a
                 item.loop_b_ms = loop_b
                 item.set_loop_enabled(loop_on)
+                item.set_audio_state(volume=volume, muted=muted)
                 if item._controls is not None:
                     item._controls.sync_from_video()
             self.scene_area.clearSelection()
@@ -509,14 +512,17 @@ class Canvas(QGraphicsView):
         selected_videos = self.selected_videos()
         video_actions = {}
         video_crop_actions = {}
+        video_mute_actions = {}
         for video in self.video_items():
             if video.contains(video.mapFromScene(self.mapToScene(event.pos()))):
                 video_menu = menu.addMenu("Video Here: " + Path(video.filename).name)
                 video_actions[video_menu.addAction("Playback Controls...")] = video
+                video_mute_actions[video_menu.addAction("Unmute Video" if video.muted else "Mute Video")] = video
                 video_crop_actions[video_menu.addAction("Crop Video")] = video
                 break
         if selected_videos:
             video_actions[menu.addAction("Selected Video — Playback Controls...")] = selected_videos[0]
+            video_mute_actions[menu.addAction("Selected Video — Unmute" if selected_videos[0].muted else "Selected Video — Mute")] = selected_videos[0]
             if len(selected_videos) == 1:
                 video_crop_actions[menu.addAction("Selected Video — Crop Video")] = selected_videos[0]
         if len(selected) == 1:
@@ -555,6 +561,11 @@ class Canvas(QGraphicsView):
             self.insert_video()
         elif chosen in video_actions:
             video_actions[chosen].controls(self.window)
+        elif chosen in video_mute_actions:
+            video = video_mute_actions[chosen]
+            before = self.capture_state()
+            video.set_audio_state(muted=not video.muted)
+            self.record_edit(before, "Toggle video mute")
         elif chosen in video_crop_actions:
             self.begin_crop(video_crop_actions[chosen])
         elif chosen == duplicate_action:

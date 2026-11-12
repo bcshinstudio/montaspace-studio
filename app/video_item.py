@@ -85,6 +85,8 @@ class VideoItem(QGraphicsVideoItem):
         )
         self.setAcceptHoverEvents(True)
         self.audio = QAudioOutput(self)
+        self.volume_percent = 65
+        self.muted = False
         self.audio.setVolume(0.65)
         self.player = QMediaPlayer(self)
         self.player.setAudioOutput(self.audio)
@@ -555,6 +557,21 @@ class VideoItem(QGraphicsVideoItem):
         except (RuntimeError, TypeError):
             pass
 
+    def set_audio_state(self, *, volume=None, muted=None):
+        """Per-video audio only; does not affect other players or decoding."""
+        if volume is not None:
+            if isinstance(volume, bool) or not isinstance(volume, int) or not 0 <= volume <= 100:
+                raise ValueError("Video volume must be an integer from 0 to 100")
+            self.volume_percent = volume
+        if muted is not None:
+            if not isinstance(muted, bool):
+                raise ValueError("Video muted state must be boolean")
+            self.muted = muted
+        self.audio.setVolume(self.volume_percent / 100.0)
+        self.audio.setMuted(self.muted)
+        if self._controls is not None:
+            self._controls.sync_audio_ui()
+
     def controls(self, parent):
         if self._controls is None:
             self._controls = VideoControls(self, parent)
@@ -869,6 +886,7 @@ class VideoControls(QDialog):
         super().__init__(parent)
         self.video = video
         self._view_before = None
+        self._volume_before = None
         video_lifecycle.observe(self, "controls")
         self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
         self.setWindowTitle(f"Video — {Path(video.filename).name}")
@@ -896,6 +914,23 @@ class VideoControls(QDialog):
 
         self.clock = QLabel('00:00 / 00:00')
         layout.addWidget(self.clock)
+
+        audio_row = QHBoxLayout()
+        self.mute_checkbox = QCheckBox('Mute this video')
+        self.mute_checkbox.setChecked(video.muted)
+        self.mute_checkbox.toggled.connect(self.toggle_mute)
+        audio_row.addWidget(self.mute_checkbox)
+        audio_row.addWidget(QLabel('Volume'))
+        self.volume_slider = QSlider(Qt.Orientation.Horizontal)
+        self.volume_slider.setRange(0, 100)
+        self.volume_slider.setValue(video.volume_percent)
+        self.volume_slider.valueChanged.connect(self.change_volume)
+        self.volume_slider.sliderPressed.connect(self._begin_volume_drag)
+        self.volume_slider.sliderReleased.connect(self._end_volume_drag)
+        audio_row.addWidget(self.volume_slider, 1)
+        self.volume_label = QLabel(f'{video.volume_percent}%')
+        audio_row.addWidget(self.volume_label)
+        layout.addLayout(audio_row)
 
         loop_grid = QGridLayout()
         self.set_a = QPushButton('Set A')
@@ -956,6 +991,37 @@ class VideoControls(QDialog):
         self.update_button(video.player.playbackState())
         self.refresh_loop_ui()
 
+    def sync_audio_ui(self):
+        """Reflect Undo/Redo and canvas mute actions without creating new edits."""
+        self.mute_checkbox.blockSignals(True)
+        self.mute_checkbox.setChecked(self.video.muted)
+        self.mute_checkbox.blockSignals(False)
+        self.volume_slider.blockSignals(True)
+        self.volume_slider.setValue(self.video.volume_percent)
+        self.volume_slider.blockSignals(False)
+        self.volume_label.setText(f'{self.video.volume_percent}%')
+
+    def _begin_volume_drag(self):
+        self._volume_before = self._begin_edit()
+
+    def _end_volume_drag(self):
+        if self._volume_before is not None:
+            self._finish_edit(self._volume_before, 'Change video volume')
+        self._volume_before = None
+
+    def change_volume(self, value):
+        before = None if self.volume_slider.isSliderDown() else self._begin_edit()
+        self.video.set_audio_state(volume=value)
+        if before is not None:
+            self._finish_edit(before, 'Change video volume')
+        else:
+            self._notify_project_change()
+
+    def toggle_mute(self, checked):
+        before = self._begin_edit()
+        self.video.set_audio_state(muted=checked)
+        self._finish_edit(before, 'Mute video' if checked else 'Unmute video')
+
     def _canvas(self):
         return self.video.scene().views()[0] if self.video.scene() and self.video.scene().views() else None
 
@@ -986,6 +1052,7 @@ class VideoControls(QDialog):
         self.zoom_slider.setValue(round(self.video.content_zoom * 100))
         self.zoom_slider.blockSignals(False)
         self.zoom_label.setText(f'{self.video.content_zoom:.2f}×')
+        self.sync_audio_ui()
         self.refresh_loop_ui()
 
     def update_view(self, _value=None):

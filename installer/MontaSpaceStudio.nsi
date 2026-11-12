@@ -1,9 +1,10 @@
 Unicode true
 !include "MUI2.nsh"
 !include "LogicLib.nsh"
+!include "nsDialogs.nsh"
 
 !define PRODUCT_NAME "MontaSpace Studio"
-!define PRODUCT_VERSION "0.5.24"
+!define PRODUCT_VERSION "0.6.1"
 !define PRODUCT_PUBLISHER "BC Shin Studio"
 !define PRODUCT_URL "https://www.bcshinstudio.com"
 !define PRODUCT_EXE "MontaSpaceStudio.exe"
@@ -15,12 +16,12 @@ InstallDir "$LOCALAPPDATA\Programs\MontaSpaceStudio"
 RequestExecutionLevel user
 SetCompressor /SOLID lzma
 
-VIProductVersion "0.5.24.0"
+VIProductVersion "0.6.1.0"
 VIAddVersionKey "ProductName" "${PRODUCT_NAME}"
 VIAddVersionKey "CompanyName" "${PRODUCT_PUBLISHER}"
 VIAddVersionKey "FileDescription" "MontaSpace Studio Installer"
-VIAddVersionKey "FileVersion" "0.5.24.0"
-VIAddVersionKey "ProductVersion" "0.5.24"
+VIAddVersionKey "FileVersion" "0.6.1.0"
+VIAddVersionKey "ProductVersion" "0.6.1"
 VIAddVersionKey "LegalCopyright" "Copyright (C) 2026 BC Shin Studio. All rights reserved."
 
 !define MUI_ABORTWARNING
@@ -36,9 +37,31 @@ VIAddVersionKey "LegalCopyright" "Copyright (C) 2026 BC Shin Studio. All rights 
 !insertmacro MUI_PAGE_FINISH
 
 !insertmacro MUI_UNPAGE_CONFIRM
+UninstPage custom un.CacheCleanupPageCreate un.CacheCleanupPageLeave
 !insertmacro MUI_UNPAGE_INSTFILES
 !insertmacro MUI_UNPAGE_FINISH
 !insertmacro MUI_LANGUAGE "English"
+
+Var CacheCleanupCheck
+Var RemoveCache
+
+Function un.CacheCleanupPageCreate
+  nsDialogs::Create 1018
+  Pop $0
+  ${If} $0 == error
+    Abort
+  ${EndIf}
+  ${NSD_CreateLabel} 0 2u 100% 32u "You may remove MontaSpace Studio's generated video thumbnail cache. Your project files, original photos, and videos will never be removed by this option."
+  Pop $0
+  ${NSD_CreateCheckbox} 0 44u 100% 18u "Remove cached thumbnails and app cache (optional)"
+  Pop $CacheCleanupCheck
+  ${NSD_Uncheck} $CacheCleanupCheck
+  nsDialogs::Show
+FunctionEnd
+
+Function un.CacheCleanupPageLeave
+  ${NSD_GetState} $CacheCleanupCheck $RemoveCache
+FunctionEnd
 
 Section "MontaSpace Studio application (required)" SecApp
   SetShellVarContext current
@@ -54,6 +77,7 @@ Section "MontaSpace Studio application (required)" SecApp
 
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayName" "MontaSpace Studio ${PRODUCT_VERSION}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayVersion" "${PRODUCT_VERSION}"
+  WriteRegStr HKCU "${UNINSTALL_KEY}" "InstallLocation" "$INSTDIR"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "Publisher" "${PRODUCT_PUBLISHER}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "URLInfoAbout" "${PRODUCT_URL}"
   WriteRegStr HKCU "${UNINSTALL_KEY}" "DisplayIcon" "$INSTDIR\${PRODUCT_EXE}"
@@ -84,4 +108,15 @@ Section "Uninstall"
   ; Only application files inside the install folder are removed.
   ; User projects saved elsewhere are not touched.
   RMDir /r "$INSTDIR"
+  ${If} $RemoveCache == ${BST_CHECKED}
+    ; QStandardPaths.CacheLocation with executable name MontaSpaceStudio.
+    ; Delete ONLY the app's own thumbnail cache, never user media or projects.
+    RMDir /r "$LOCALAPPDATA\MontaSpaceStudio\cache\video-posters"
+    RMDir "$LOCALAPPDATA\MontaSpaceStudio\cache"
+    RMDir "$LOCALAPPDATA\MontaSpaceStudio"
+    ; Rare QStandardPaths fallback when no cache path is available.
+    RMDir /r "$PROFILE\.montaspace-studio\cache\video-posters"
+    RMDir "$PROFILE\.montaspace-studio\cache"
+    RMDir "$PROFILE\.montaspace-studio"
+  ${EndIf}
 SectionEnd
