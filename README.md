@@ -1,4 +1,4 @@
-# MontaSpace Studio v0.5.23
+# MontaSpace Studio v0.5.24
 
 **MontaSpace Studio** is a lightweight, frameless Windows whiteboard for arranging photos and videos, by **BC Shin Studio**. It is a separate application from the photo-only MontaSpace.
 
@@ -60,7 +60,7 @@ Automated tests cover algorithms and source-level contracts; they do not replace
 ## Windows packaging
 
 - `build_windows.bat` — builds the PyInstaller one-directory app.
-- `build_installer.bat` — builds the app and the free NSIS installer (`installer-output/MontaSpaceStudio_Setup_0.5.23.exe`).
+- `build_installer.bat` — builds the app and the free NSIS installer (`installer-output/MontaSpaceStudio_Setup_0.5.24.exe`).
 - The scripts expect a project-local `.venv` and required packaging tools.
 - Generated `build/`, `dist/`, `installer-output/` and `.venv/` are ignored by Git.
 
@@ -109,3 +109,23 @@ Before committing changes, run `run_regression_tests.bat` from the project folde
 It checks the existing logic tests and real Qt whiteboard operations with
 small bundled/temporary media. See `docs/AUTOMATED_REGRESSION_TESTS.md`.
 The automated playback memory test is separate: `run_studio_loop_test.bat "video.mp4"`.
+
+
+## v0.5.24 — Linked-project reliability
+
+- Linked projects continue to use project-folder-relative media paths.
+- Opening a linked Studio project or legacy photo project with missing files now offers
+  **Locate Folder** before changing the current board. Cancel preserves the board.
+- Folder recovery scans are bounded (4,000 entries), use exact filename matches,
+  and refuse ambiguous duplicates rather than selecting the wrong picture/video.
+- Recovered projects show an unsaved-change mark until the repaired paths are saved.
+- Save verifies the staged linked JSON or portable ZIP before atomic replacement,
+  preserving the previous project on verification failure.
+- Project parsing rejects invalid extensions and non-positive photo crops.
+- Existing Save/Discard/Cancel prompts and legacy import remain supported.
+- Regression tests cover missing media, moved folders, ambiguous matches,
+  staged saves, cancellation, project preservation and save/reload after recovery.
+- **Note:** recovery requires the source media still exists somewhere on disk;
+  it does not restore deleted files or alter original media.
+
+Run `run_regression_tests.bat` before committing this version.

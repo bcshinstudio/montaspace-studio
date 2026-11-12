@@ -112,6 +112,70 @@ class RealWhiteboardRegression(unittest.TestCase):
         self.assertTrue(self.board._read_project(destination))
         self.assertEqual(len(self.board.canvas.image_stack()), 1)
 
+    def test_linked_missing_media_cancel_preserves_open_board(self):
+        from unittest.mock import patch
+        self.add_photo()
+        project = self.root / 'missing.mstudio'
+        self.assertTrue(self.board._write_project(project))
+        data = json.loads(project.read_text(encoding='utf-8'))
+        data['items'][0]['source'] = 'missing_photo.jpg'
+        project.write_text(json.dumps(data), encoding='utf-8')
+        old_project = self.board.project_path
+        old_snapshot = self.board.project_snapshot()
+        with patch.object(self.board, '_recover_missing_sources', return_value=None):
+            self.assertFalse(self.board._read_project(project))
+        self.assertEqual(self.board.project_path, old_project)
+        self.assertEqual(self.board.project_snapshot(), old_snapshot)
+
+    def test_linked_missing_media_recovery_preserves_layout(self):
+        from unittest.mock import patch
+        photo = self.add_photo()
+        photo.setPos(QPointF(123, 177))
+        project = self.root / 'recovery.mstudio'
+        self.assertTrue(self.board._write_project(project))
+        data = json.loads(project.read_text(encoding='utf-8'))
+        data['items'][0]['source'] = 'old/location/test_photo.png'
+        project.write_text(json.dumps(data), encoding='utf-8')
+        from app.project_reliability import apply_relocations
+        def fake_recover(records):
+            return apply_relocations(records, {records[0]['source']: str(self.photo)})
+        with patch.object(self.board, '_recover_missing_sources', side_effect=fake_recover):
+            self.assertTrue(self.board._read_project(project))
+        restored = self.board.canvas.image_stack()
+        self.assertEqual(len(restored), 1)
+        self.assertAlmostEqual(restored[0].pos().x(), 123)
+        self.assertAlmostEqual(restored[0].pos().y(), 177)
+        self.assertTrue(self.board.project_is_modified())
+        # Saving commits the recovered links for subsequent opens.
+        self.assertTrue(self.board.save_project())
+        self.assertFalse(self.board.project_is_modified())
+        self.assertTrue(self.board._read_project(project))
+        self.assertEqual(len(self.board.canvas.image_stack()), 1)
+
+    def test_corrupt_project_preserves_existing_board(self):
+        self.add_photo()
+        saved = self.board.project_snapshot()
+        corrupt = self.root / 'corrupt.mstudio'
+        corrupt.write_text('{garbled', encoding='utf-8')
+        from unittest.mock import patch
+        with patch('app.project.QMessageBox.critical'):
+            self.assertFalse(self.board._read_project(corrupt))
+        self.assertEqual(self.board.project_snapshot(), saved)
+
+    def test_legacy_missing_photo_cancel_preserves_existing_board(self):
+        self.add_photo()
+        before = self.board.project_snapshot()
+        legacy = self.root / 'legacy.mspace'
+        legacy.write_text(json.dumps({
+            'format': 'MontaSpace', 'version': 1,
+            'images': [{'source': 'not_here.jpg', 'x': 0, 'y': 0, 'scale': 1,
+                        'rotation': 0, 'z': 0, 'crop': [0, 0, 20, 20]}]
+        }), encoding='utf-8')
+        from unittest.mock import patch
+        with patch.object(self.board, '_recover_missing_sources', return_value=None):
+            self.assertFalse(self.board._read_project(legacy))
+        self.assertEqual(self.board.project_snapshot(), before)
+
     def test_video_does_not_autoplay_on_insert(self):
         video = self.add_video()
         self.assertNotEqual(video.player.playbackState(), QMediaPlayer.PlaybackState.PlayingState)

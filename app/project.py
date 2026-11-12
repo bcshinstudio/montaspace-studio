@@ -17,6 +17,8 @@ from PySide6.QtWidgets import QFileDialog, QMessageBox
 
 from .config import APP_NAME, PROJECT_FILTER, SUPPORTED_EXTENSIONS, VIDEO_EXTENSIONS
 from .video_poster import poster_cache, MAX_POSTER_BYTES
+from .project_reliability import (resolve_sources, missing_sources, candidate_relocations,
+                                  apply_relocations, verify_staged_project)
 
 STUDIO_EXTENSIONS = {".mstudio", ".mstudiopack"}
 LEGACY_EXTENSIONS = {".mspace", ".mspacepack"}
@@ -202,23 +204,11 @@ class ProjectPersistenceMixin:
                 with temp_path.open("w", encoding="utf-8") as handle:
                     json.dump(payload, handle, indent=2, ensure_ascii=False)
                     handle.write("\n")
+            # Check the temporary artifact before touching the user's last good copy.
+            verify_staged_project(
+                temp_path, len(payload['items']),
+                sum(row['type'] == 'video' for row in payload['items']), portable)
             os.replace(temp_path, target)
-            # Confirm that the completed project really contains all photo
-            # AND video entries, not just a successfully-written archive.
-            if portable:
-                with zipfile.ZipFile(target, 'r') as check_archive:
-                    saved = json.loads(check_archive.read('project.json').decode('utf-8'))
-                    embedded = {info.filename for info in check_archive.infolist()}
-                    expected = {record['source'] for record in payload['items']}
-                    if not expected.issubset(embedded):
-                        raise ValueError('Portable project is missing embedded media.')
-            else:
-                with target.open('r', encoding='utf-8') as check_handle:
-                    saved = json.load(check_handle)
-            if (len(saved.get('items', [])) != len(payload['items']) or
-                    sum(item.get('type') == 'video' for item in saved['items']) !=
-                    sum(item.get('type') == 'video' for item in payload['items'])):
-                raise ValueError('Save verification failed: video records are missing.')
         except (OSError, ValueError, zipfile.BadZipFile, KeyError) as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
             return False
@@ -245,6 +235,49 @@ class ProjectPersistenceMixin:
         if Path(target).suffix.lower() in LEGACY_EXTENSIONS:
             return self._read_legacy_project(target)
         return self._read_studio_project(target)
+
+    def _recover_missing_sources(self, resolved):
+        """Recover linked media before changing the current board.
+
+        Cancel leaves the complete existing whiteboard untouched. No missing
+        objects are silently discarded; only unambiguous matches are accepted.
+        """
+        remaining = missing_sources(resolved)
+        if not remaining:
+            return resolved
+        while remaining:
+            shown = "\n".join(f"• {Path(name).name}" for name in remaining[:12])
+            if len(remaining) > 12:
+                shown += f"\n… and {len(remaining) - 12} more"
+            dialog = QMessageBox(self)
+            dialog.setIcon(QMessageBox.Icon.Warning)
+            dialog.setWindowTitle("Missing project media")
+            dialog.setText(f"{len(remaining)} linked media file(s) are missing.\n\n{shown}")
+            dialog.setInformativeText(
+                "Locate the folder containing the moved files. Studio will "
+                "match unique filenames and preserve the board layout. "
+                "Cancel keeps the current project unchanged."
+            )
+            locate = dialog.addButton("Locate Folder…", QMessageBox.ButtonRole.AcceptRole)
+            dialog.addButton(QMessageBox.StandardButton.Cancel)
+            dialog.exec()
+            if dialog.clickedButton() is not locate:
+                return None
+            selected = QFileDialog.getExistingDirectory(
+                self, "Select folder containing missing media", str(Path.home()))
+            if not selected:
+                return None
+            mapping = candidate_relocations(remaining, selected)
+            resolved = apply_relocations(resolved, mapping)
+            next_remaining = missing_sources(resolved)
+            if len(next_remaining) == len(remaining):
+                QMessageBox.information(
+                    self, "No unique matches",
+                    "No missing files could be matched uniquely in that folder. "
+                    "Try their original parent folder or a more specific location."
+                )
+            remaining = next_remaining
+        return resolved
 
     def _read_studio_project(self, target):
         """Validate all records before modifying the current whiteboard."""
@@ -309,19 +342,20 @@ class ProjectPersistenceMixin:
                     data = json.load(handle)
                 parsed = self._parse_studio_records(data, target, portable=False)
 
-            resolved = []
-            for record in parsed:
-                item = dict(record)
-                source = Path(record["source"])
-                if portable:
-                    source = Path(temp_dir.path()) / source
-                elif not source.is_absolute():
-                    source = target.parent / source
-                item["source"] = str(source.resolve())
-                resolved.append(item)
+            resolved = resolve_sources(parsed, target.parent,
+                                       temp_dir.path() if portable else None)
         except (OSError, ValueError, TypeError, KeyError, IndexError,
                 json.JSONDecodeError, zipfile.BadZipFile, RuntimeError) as exc:
             QMessageBox.critical(self, "Open failed", str(exc))
+            return False
+
+        had_missing_linked_media = not portable and bool(missing_sources(resolved))
+        if not portable:
+            resolved = self._recover_missing_sources(resolved)
+            if resolved is None:
+                return False
+        elif missing_sources(resolved):
+            QMessageBox.critical(self, "Open failed", "Portable project media could not be extracted.")
             return False
 
         self.canvas.finish_crop(False)
@@ -369,7 +403,10 @@ class ProjectPersistenceMixin:
         self.project_path = target
         self._temp_extract = temp_dir
         self._embedded_sources = embedded_paths
-        self._saved_snapshot = self.project_snapshot() if not missing else None
+        # Recovery changes saved file references; make the user save the repaired
+        # links rather than silently treating the old project as up to date.
+        self._saved_snapshot = (None if missing or had_missing_linked_media
+                                else self.project_snapshot())
         self.update_modified_title()
         if missing:
             QMessageBox.warning(self, "Missing media",
@@ -393,6 +430,9 @@ class ProjectPersistenceMixin:
             source = record["source"]
             if not isinstance(source, str) or not source or "\x00" in source:
                 raise ValueError("Invalid source filename.")
+            extensions = VIDEO_EXTENSIONS if typ == 'video' else SUPPORTED_EXTENSIONS
+            if Path(source).suffix.lower() not in extensions:
+                raise ValueError("Unsupported project media extension.")
             values = {k: float(record[k]) for k in ("x", "y", "scale", "rotation", "z")}
             if not all(math.isfinite(value) for value in values.values()):
                 raise ValueError("Invalid item transform.")
@@ -401,7 +441,8 @@ class ProjectPersistenceMixin:
             item = {"type": typ, "source": source, **values}
             if typ == "image":
                 crop = [float(v) for v in record["crop"]]
-                if len(crop) != 4 or not all(math.isfinite(v) for v in crop):
+                if (len(crop) != 4 or not all(math.isfinite(v) for v in crop)
+                        or crop[2] <= 0 or crop[3] <= 0):
                     raise ValueError("Invalid image crop values.")
                 item["crop"] = crop
             else:
@@ -525,6 +566,16 @@ class ProjectPersistenceMixin:
             QMessageBox.critical(self, "Open failed", str(exc))
             return False
 
+        had_missing_linked_media = not portable and any(
+            not Path(src).is_file() for src, _nums, _crop in parsed)
+        if not portable:
+            records = [{'source': str(src.resolve())} for src, _nums, _crop in parsed]
+            recovered = self._recover_missing_sources(records)
+            if recovered is None:
+                return False
+            parsed = [(Path(row['source']), nums, crop)
+                      for row, (_src, nums, crop) in zip(recovered, parsed)]
+
         self.canvas.finish_crop(False)
         self.canvas.stop_videos()
         self.canvas.scene_area.clear()
@@ -548,7 +599,7 @@ class ProjectPersistenceMixin:
         self._temp_extract = temporary
         self._embedded_sources = embedded_paths
         self.undo_stack.clear()
-        self._saved_snapshot = self.project_snapshot()
+        self._saved_snapshot = None if had_missing_linked_media else self.project_snapshot()
         self.update_modified_title()
         if missing:
             shown = "\n".join(missing[:8])
