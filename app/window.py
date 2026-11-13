@@ -93,7 +93,7 @@ class MontaSpace(ProjectPersistenceMixin, QMainWindow):
             "<b>Studio portable projects:</b> .mstudiopack<br>"
             "<b>Imports:</b> .mspace, .mspacepack</p>"
             "<p>Built with Python and PySide6 (Qt).<br>"
-            "Photos, MP4 playback, A–B looping, and project saving.</p>"
+            "Photos, video playback, A–B looping, and project saving.</p>"
             "<p><small>Copyright in photos imported by users remains with "
             "their respective owners.</small></p>",
         )

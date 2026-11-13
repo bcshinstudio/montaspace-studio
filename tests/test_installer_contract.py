@@ -14,12 +14,12 @@ class InstallerContractTests(unittest.TestCase):
         cls.config = (ROOT / 'app/config.py').read_text()
 
     def test_all_versions_match(self):
-        self.assertIn('APP_VERSION = "0.6.1"', self.config)
-        self.assertIn('!define PRODUCT_VERSION "0.6.1"', self.nsi)
-        self.assertIn('VIProductVersion "0.6.1.0"', self.nsi)
-        self.assertIn('filevers=(0, 6, 1, 0)', self.meta)
-        self.assertIn('prodvers=(0, 6, 1, 0)', self.meta)
-        self.assertIn('MontaSpaceStudio_Setup_0.6.1.exe', self.bat)
+        self.assertIn('APP_VERSION = "0.6.2"', self.config)
+        self.assertIn('!define PRODUCT_VERSION "0.6.2"', self.nsi)
+        self.assertIn('VIProductVersion "0.6.2.0"', self.nsi)
+        self.assertIn('filevers=(0, 6, 2, 0)', self.meta)
+        self.assertIn('prodvers=(0, 6, 2, 0)', self.meta)
+        self.assertIn('MontaSpaceStudio_Setup_0.6.2.exe', self.bat)
 
     def test_cache_opt_in_defaults_off(self):
         self.assertIn('UninstPage custom un.CacheCleanupPageCreate un.CacheCleanupPageLeave', self.nsi)

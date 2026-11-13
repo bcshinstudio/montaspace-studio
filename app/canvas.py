@@ -3,7 +3,7 @@ from pathlib import Path
 from uuid import uuid4
 from PySide6.QtCore import Qt, QRectF, QLineF
 from PySide6.QtGui import QColor, QBrush, QPainter
-from PySide6.QtWidgets import QFileDialog, QGraphicsScene, QGraphicsView, QMenu
+from PySide6.QtWidgets import QFileDialog, QGraphicsScene, QGraphicsView, QMenu, QMessageBox
 from .config import IMAGE_FILTER, SUPPORTED_EXTENSIONS, VIDEO_FILTER, VIDEO_EXTENSIONS
 from .history import StateCommand
 from .image_item import ImageItem
@@ -209,8 +209,13 @@ class Canvas(QGraphicsView):
 
     def insert_image(self):
         filename, _ = QFileDialog.getOpenFileName(self, "Insert Image", "", IMAGE_FILTER)
-        if filename:
-            self.add_image(filename)
+        if filename and not self.add_image(filename):
+            QMessageBox.warning(
+                self, "Cannot open image",
+                "This image could not be decoded. The format or compression may not "
+                "be supported by this installation's image codecs.\n\n"
+                "Try another file or convert it to PNG/JPEG."
+            )
 
     def video_items(self):
         return [item for item in self.scene_area.items() if isinstance(item, VideoItem)]
@@ -246,7 +251,7 @@ class Canvas(QGraphicsView):
         return True
 
     def insert_video(self):
-        filename, _ = QFileDialog.getOpenFileName(self, "Insert MP4 Video", "", VIDEO_FILTER)
+        filename, _ = QFileDialog.getOpenFileName(self, "Insert Video", "", VIDEO_FILTER)
         if filename:
             self.add_video(filename)
 
@@ -609,19 +614,31 @@ class Canvas(QGraphicsView):
     def dropEvent(self, event):
         pos = self.mapToScene(event.position().toPoint())
         count = 0
+        failures = []
         for url in event.mimeData().urls():
             if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in (SUPPORTED_EXTENSIONS | VIDEO_EXTENSIONS):
                 source = url.toLocalFile()
-                added = (self.add_video(source, pos) if Path(source).suffix.lower() in VIDEO_EXTENSIONS
-                         else self.add_image(source, pos))
+                is_video = Path(source).suffix.lower() in VIDEO_EXTENSIONS
+                added = self.add_video(source, pos) if is_video else self.add_image(source, pos)
                 if added:
                     count += 1
                     pos.setX(pos.x() + 25)
                     pos.setY(pos.y() + 25)
-        if count:
+                elif not is_video:
+                    failures.append(Path(source).name)
+        if count or failures:
             event.acceptProposedAction()
         else:
             event.ignore()
+        if failures:
+            QMessageBox.warning(
+                self, "Cannot open image",
+                "Could not decode the following dropped images:\n"
+                + "\n".join(failures[:10])
+                + (f"\n...and {len(failures) - 10} more" if len(failures) > 10 else "")
+                + "\n\nInstall the image codecs listed in requirements.txt "
+                  "(including pillow-heif for HEIC/HEIF), or check whether the files are damaged."
+            )
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:

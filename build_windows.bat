@@ -26,7 +26,11 @@ if not exist "windows_version_info.txt" (
 ".venv\Scripts\python.exe" -m pip install "PyInstaller>=6,<7"
 if errorlevel 1 goto :fail
 
-".venv\Scripts\python.exe" -m PyInstaller --noconfirm --onedir --windowed --name MontaSpaceStudio --icon "assets\MontaSpaceStudio.ico" --add-data "assets\MontaSpaceStudio.ico;assets" --version-file "windows_version_info.txt" main.py
+rem Fail early if the HEIC decoder isn't installed in the build environment.
+".venv\Scripts\python.exe" "tools\check_image_codecs.py"
+if errorlevel 1 goto :fail
+
+".venv\Scripts\python.exe" -m PyInstaller --collect-all pillow_heif --noconfirm --onedir --windowed --name MontaSpaceStudio --icon "assets\MontaSpaceStudio.ico" --add-data "assets\MontaSpaceStudio.ico;assets" --version-file "windows_version_info.txt" main.py
 if errorlevel 1 goto :fail
 
 echo.
