@@ -20,3 +20,10 @@ def asset_path(relative_path):
     """Locate assets from both source runs and a PyInstaller bundle."""
     root = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent.parent))
     return root / relative_path
+
+
+def application_icon_path():
+    """Choose native icon asset without changing Windows packaging."""
+    icon = "MontaSpaceStudio"
+    suffix = ".png" if sys.platform == "darwin" else ".ico"
+    return asset_path(f"assets/{icon}{suffix}")

@@ -598,47 +598,83 @@ class Canvas(QGraphicsView):
         elif chosen == exit_action:
             self.window.close()
 
+    @staticmethod
+    def _has_local_drop_urls(event):
+        """Allow local-file drops to reach dropEvent for useful feedback."""
+        return any(url.isLocalFile() for url in event.mimeData().urls())
+
     def dragEnterEvent(self, event):
-        if any(u.isLocalFile() and Path(u.toLocalFile()).suffix.lower() in (SUPPORTED_EXTENSIONS | VIDEO_EXTENSIONS)
-               for u in event.mimeData().urls()):
+        if self._has_local_drop_urls(event):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event):
-        if event.mimeData().hasUrls():
+        if self._has_local_drop_urls(event):
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dropEvent(self, event):
-        pos = self.mapToScene(event.position().toPoint())
-        count = 0
-        failures = []
-        for url in event.mimeData().urls():
-            if url.isLocalFile() and Path(url.toLocalFile()).suffix.lower() in (SUPPORTED_EXTENSIONS | VIDEO_EXTENSIONS):
-                source = url.toLocalFile()
-                is_video = Path(source).suffix.lower() in VIDEO_EXTENSIONS
-                added = self.add_video(source, pos) if is_video else self.add_image(source, pos)
-                if added:
-                    count += 1
-                    pos.setX(pos.x() + 25)
-                    pos.setY(pos.y() + 25)
-                elif not is_video:
-                    failures.append(Path(source).name)
-        if count or failures:
-            event.acceptProposedAction()
-        else:
+        local_urls = [url for url in event.mimeData().urls() if url.isLocalFile()]
+        if not local_urls:
             event.ignore()
-        if failures:
-            QMessageBox.warning(
-                self, "Cannot open image",
-                "Could not decode the following dropped images:\n"
-                + "\n".join(failures[:10])
-                + (f"\n...and {len(failures) - 10} more" if len(failures) > 10 else "")
-                + "\n\nInstall the image codecs listed in requirements.txt "
-                  "(including pillow-heif for HEIC/HEIF), or check whether the files are damaged."
-            )
+            return
+
+        pos = self.mapToScene(event.position().toPoint())
+        added_count = 0
+        unsupported = []
+        failed_images = []
+        failed_videos = []
+        folders = []
+        supported = SUPPORTED_EXTENSIONS | VIDEO_EXTENSIONS
+
+        for url in local_urls:
+            source = url.toLocalFile()
+            path = Path(source)
+            if path.is_dir():
+                folders.append(path.name or source)
+                continue
+            if not path.is_file():
+                # File can disappear between the drag beginning and the drop.
+                failed_images.append(path.name or source)
+                continue
+            extension = path.suffix.lower()
+            if extension not in supported:
+                unsupported.append(path.name)
+                continue
+
+            is_video = extension in VIDEO_EXTENSIONS
+            added = self.add_video(source, pos) if is_video else self.add_image(source, pos)
+            if added:
+                added_count += 1
+                pos.setX(pos.x() + 25)
+                pos.setY(pos.y() + 25)
+            elif is_video:
+                failed_videos.append(path.name)
+            else:
+                failed_images.append(path.name)
+
+        # A local-file drop is handled even when nothing could be imported.
+        event.acceptProposedAction()
+        if unsupported or failed_images or failed_videos or folders:
+            details = []
+
+            def list_issue(heading, names):
+                if names:
+                    details.append(heading + "\n" + "\n".join(names[:10])
+                                   + (f"\n...and {len(names) - 10} more" if len(names) > 10 else ""))
+
+            list_issue("Unsupported file type:", unsupported)
+            list_issue("Could not open image or file is missing:", failed_images)
+            list_issue("Could not add video:", failed_videos)
+            list_issue("Folders cannot be inserted:", folders)
+            if failed_images:
+                details.append("For images, check the file and installed image codecs "
+                               "(including pillow-heif for HEIC/HEIF).")
+            if failed_videos:
+                details.append("For videos, confirm the file still exists and try opening it again.")
+            QMessageBox.warning(self, "Some files could not be inserted", "\n\n".join(details))
 
     def wheelEvent(self, event):
         if event.modifiers() & Qt.KeyboardModifier.ControlModifier:

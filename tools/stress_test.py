@@ -1,99 +1,188 @@
-"""MontaSpace isolated stress test. Generates images ONLY in temporary directory.
-Run: python tools/stress_test.py 50
-Does not modify user photos, projects, or the normal application window.
+"""Isolated image-only performance benchmark for MontaSpace Studio.
+
+Run from the Studio repository root:
+  python tools/stress_test.py 25
+  python tools/stress_test.py 50
+  python tools/stress_test.py 100
+
+Uses generated solid-color JPEGs in a disposable directory. Does not test videos
+or performance with real photographs. Each invocation is a fresh Python process.
 """
-import csv
+
 import json
-import os
+import math
 import sys
 import tempfile
 import time
+from datetime import datetime
 from pathlib import Path
+from uuid import uuid4
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from PySide6.QtCore import Qt
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from PySide6.QtGui import QColor, QImage
 from PySide6.QtWidgets import QApplication
+
+from app.config import APP_VERSION
+from app.performance import (
+    memory_peak_working_set_mb,
+    memory_private_mb,
+    memory_working_set_mb,
+)
 from app.window import MontaSpace
-from app.performance import memory_working_set_mb, memory_peak_working_set_mb
+
+
+COUNT_LIMIT = 100
+DIMENSIONS = (1800, 1200)
+TRANSFORM_FIELDS = ("x", "y", "scale", "rotation", "z")
+
+
+def require(condition, message):
+    if not condition:
+        raise RuntimeError(message)
+
+
+def image_transforms(window):
+    """A stable snapshot independent of image source paths and selection state."""
+    images = [row for row in window.project_snapshot() if row["type"] == "image"]
+    return sorted(
+        [{field: float(row[field]) for field in TRANSFORM_FIELDS} for row in images],
+        key=lambda row: row["z"],
+    )
+
+
+def check_restored(window, expected, stage):
+    actual = image_transforms(window)
+    require(len(actual) == len(expected), f"{stage}: count {len(actual)} != {len(expected)}")
+    for index, (want, got) in enumerate(zip(expected, actual)):
+        for field in TRANSFORM_FIELDS:
+            require(
+                math.isclose(got[field], want[field], rel_tol=1e-7, abs_tol=1e-5),
+                f"{stage}: image {index}, {field}: {got[field]} != {want[field]}",
+            )
+
+
+def round_mb(value):
+    return round(value, 3) if value is not None else None
 
 
 def run(count):
-    if not 1 <= count <= 100:
-        raise ValueError("Choose an image count from 1 to 100")
+    if not 1 <= count <= COUNT_LIMIT:
+        raise ValueError(f"Choose an image count from 1 to {COUNT_LIMIT}")
+
     app = QApplication.instance() or QApplication([])
     window = MontaSpace()
-    samples = []
-    with tempfile.TemporaryDirectory(prefix="montaspace-test-") as folder:
+    with tempfile.TemporaryDirectory(prefix="montaspace-studio-image-stress-") as folder:
         root = Path(folder)
         start = time.perf_counter()
-        for i in range(count):
-            image = QImage(1800, 1200, QImage.Format.Format_RGB32)
-            image.fill(QColor.fromHsv((i * 37) % 360, 170, 210))
-            path = root / f"stress_{i:03d}.jpg"
-            if not image.save(str(path), "JPEG", 83):
-                raise RuntimeError(f"Could not generate {path}")
-        generated_sec = time.perf_counter() - start
+        for index in range(count):
+            sample = QImage(*DIMENSIONS, QImage.Format.Format_RGB32)
+            sample.fill(QColor.fromHsv((index * 37) % 360, 170, 210))
+            path = root / f"stress_{index:03d}.jpg"
+            require(sample.save(str(path), "JPEG", 83), f"Could not generate {path}")
+        generate_seconds = time.perf_counter() - start
+
         start = time.perf_counter()
-        for i in range(count):
-            path = root / f"stress_{i:03d}.jpg"
-            if not window.canvas.add_image(str(path), record_undo=False):
-                raise RuntimeError(f"Could not insert {path}")
-        load_sec = time.perf_counter() - start
+        for index in range(count):
+            path = root / f"stress_{index:03d}.jpg"
+            require(window.canvas.add_image(str(path), record_undo=False), f"Could not insert {path}")
+        insert_seconds = time.perf_counter() - start
         app.processEvents()
-        loaded_ram = memory_working_set_mb()
-        # Include a few transforms; do not alter any original files.
-        for i, item in enumerate(window.canvas.image_stack()):
-            item.setPos((i % 10) * 105, (i // 10) * 75)
-            item.setRotation((i % 5) * 3)
-            item.setScale(0.65 + (i % 3) * 0.1)
+        require(len(window.canvas.image_stack()) == count, "Image count mismatch after insertion")
+        rss_after_insert = memory_working_set_mb()
+
+        for index, item in enumerate(window.canvas.image_stack()):
+            item.setPos((index % 10) * 105, (index // 10) * 75)
+            item.setRotation((index % 5) * 3)
+            item.setScale(0.65 + (index % 3) * 0.1)
+        expected = image_transforms(window)
+
+        linked = root / "stress.mstudio"
         start = time.perf_counter()
-        linked = root / "stress.mspace"
-        assert window._write_project(linked), "Linked project save failed"
-        linked_sec = time.perf_counter() - start
+        require(window._write_project(linked), "Linked project save failed")
+        linked_save_seconds = time.perf_counter() - start
+        require(linked.is_file() and linked.stat().st_size > 0, "Linked file missing or empty")
+
+        portable = root / "stress.mstudiopack"
         start = time.perf_counter()
-        pack = root / "stress.mspacepack"
-        assert window._write_project(pack), "Portable project save failed"
-        portable_sec = time.perf_counter() - start
+        require(window._write_project(portable), "Portable project save failed")
+        portable_save_seconds = time.perf_counter() - start
+        require(portable.is_file() and portable.stat().st_size > 0, "Portable file missing or empty")
+
         start = time.perf_counter()
-        assert window._read_project(linked), "Linked project open failed"
-        linked_open_sec = time.perf_counter() - start
-        assert len(window.canvas.image_stack()) == count, "Image count mismatch after reopen"
+        require(window._read_project(linked), "Linked project reopen failed")
+        linked_open_seconds = time.perf_counter() - start
+        check_restored(window, expected, "linked reopen")
+
         start = time.perf_counter()
-        assert window._read_project(pack), "Portable project open failed"
-        portable_open_sec = time.perf_counter() - start
-        assert len(window.canvas.image_stack()) == count, "Image count mismatch after portable reopen"
+        require(window._read_project(portable), "Portable project reopen failed")
+        portable_open_seconds = time.perf_counter() - start
+        check_restored(window, expected, "portable reopen")
+        app.processEvents()
+
+        rss_after_test = memory_working_set_mb()
+        peak_rss = memory_peak_working_set_mb()
+        footprint = memory_private_mb()
+        if sys.platform == "darwin":
+            for name, value in (
+                ("rss_after_insert", rss_after_insert),
+                ("rss_after_test", rss_after_test),
+                ("peak_rss", peak_rss),
+                ("physical_footprint", footprint),
+            ):
+                require(
+                    value is not None and math.isfinite(value) and value > 0,
+                    f"macOS memory reading unavailable: {name}={value!r}",
+                )
+
         report = {
-            "version": "0.8.1", "images": count,
-            "generated_seconds": round(generated_sec, 3),
-            "insert_seconds": round(load_sec, 3),
-            "linked_save_seconds": round(linked_sec, 3),
-            "portable_save_seconds": round(portable_sec, 3),
-            "linked_open_seconds": round(linked_open_sec, 3),
-            "portable_open_seconds": round(portable_open_sec, 3),
-            "ram_after_insert_mb": round(loaded_ram, 1) if loaded_ram is not None else None,
-            "ram_after_test_mb": round(memory_working_set_mb() or 0, 1),
-            "peak_ram_mb": round(memory_peak_working_set_mb() or 0, 1),
+            "app": "MontaSpace Studio",
+            "version": APP_VERSION,
+            "scenario": "synthetic-image-only",
+            "images": count,
+            "image_dimensions": f"{DIMENSIONS[0]}x{DIMENSIONS[1]}",
+            "generate_seconds": round(generate_seconds, 5),
+            "insert_seconds": round(insert_seconds, 5),
+            "linked_save_seconds": round(linked_save_seconds, 5),
+            "portable_save_seconds": round(portable_save_seconds, 5),
+            "linked_open_seconds": round(linked_open_seconds, 5),
+            "portable_open_seconds": round(portable_open_seconds, 5),
+            "working_set_after_insert_mb": round_mb(rss_after_insert),
+            "working_set_after_test_mb": round_mb(rss_after_test),
+            "peak_working_set_mb": round_mb(peak_rss),
+            "private_memory_mb": round_mb(footprint),
+            "private_memory_definition": (
+                "macOS physical footprint (phys_footprint)" if sys.platform == "darwin"
+                else "Windows private committed bytes" if sys.platform == "win32"
+                else "unavailable"
+            ),
+            "linked_size_mb": round(linked.stat().st_size / (1024 * 1024), 5),
+            "portable_size_mb": round(portable.stat().st_size / (1024 * 1024), 5),
+            "transform_verification": "linked and portable passed",
         }
-        # Reset references before temporary files are deleted.
+
+        # Make sure Qt objects holding extracted files are gone before cleanup.
         window.canvas.scene_area.clear()
         window._temp_extract = None
         window.undo_stack.clear()
-    print(json.dumps(report, indent=2))
-    # Store reports OUTSIDE the source tree and don't overwrite previous reports.
+
     output = Path.home() / "Documents" / "MontaSpaceStudio_Test_Reports"
     output.mkdir(parents=True, exist_ok=True)
-    path = output / f"MontaSpaceStudio_Stress_{time.strftime('%Y%m%d_%H%M%S')}_{count}.json"
-    path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(f"Report saved: {path}")
-    # Avoid closing window (may show an unsaved-changes dialog).
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    target = output / f"MontaSpaceStudio_Stress_{timestamp}_{count}_{uuid4().hex[:8]}.json"
+    target.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+    print(json.dumps(report, indent=2))
+    print(f"PASS: {count} images, both project formats, transform preservation")
+    print(f"Report saved: {target}")
     return report
 
 
 if __name__ == "__main__":
     try:
-        n = int(sys.argv[1]) if len(sys.argv) > 1 else 25
-        run(n)
+        selected = int(sys.argv[1]) if len(sys.argv) > 1 else 25
+        run(selected)
     except Exception as exc:
         print(f"STRESS TEST FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         sys.exit(1)

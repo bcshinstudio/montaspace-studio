@@ -84,6 +84,9 @@ class _QtPosterJob(QObject):
         self._player.setSource(QUrl.fromLocalFile(self.filename))
 
     def _on_status(self, status):
+        # Qt can deliver a queued media-status signal after cleanup.
+        if self._player is None:
+            return
         if status in (QMediaPlayer.MediaStatus.LoadedMedia,
                       QMediaPlayer.MediaStatus.BufferedMedia):
             if not self._started:
@@ -101,23 +104,28 @@ class _QtPosterJob(QObject):
 
     def _next_attempt(self):
         self._attempt_timer.stop()
+        player = self._player
+        if player is None:
+            return
         if not self._targets:
             self._finish(None)
             return
         target = self._targets.pop(0)
-        duration = self._player.duration()
+        duration = player.duration()
         if duration > 0:
             target = min(target, max(0, duration - 120))
         self._current_target = max(0, int(target))
-        self._player.pause()
-        self._player.setPosition(self._current_target)
-        self._player.play()
+        player.pause()
+        player.setPosition(self._current_target)
+        player.play()
         self._attempt_timer.start(QT_ATTEMPT_TIMEOUT_MS)
 
     def _on_frame(self, frame):
-        if not frame.isValid():
+        # A frame may already be queued when _finish clears the player.
+        player = self._player
+        if player is None or not frame.isValid():
             return
-        if self._player.position() + 80 < self._current_target:
+        if player.position() + 80 < self._current_target:
             return
         try:
             image = frame.toImage()

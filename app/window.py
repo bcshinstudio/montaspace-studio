@@ -6,7 +6,7 @@ from PySide6.QtCore import Qt, QEvent
 from PySide6.QtGui import QIcon, QKeySequence, QShortcut, QUndoStack
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import QApplication, QMainWindow, QMessageBox
-from .config import APP_NAME, APP_VERSION, PUBLISHER, COPYRIGHT, WEBSITE, asset_path
+from .config import APP_NAME, APP_VERSION, PUBLISHER, COPYRIGHT, WEBSITE, asset_path, application_icon_path
 from .canvas import Canvas
 from .shortcut_help import ShortcutHelp
 from .performance import memory_working_set_mb, memory_peak_working_set_mb, memory_private_mb
@@ -22,7 +22,7 @@ class MontaSpace(ProjectPersistenceMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.setWindowIcon(QIcon(str(asset_path("assets/MontaSpaceStudio.ico"))))
+        self.setWindowIcon(QIcon(str(application_icon_path())))
         self.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
         self.resize(900, 600)
         self.setMinimumSize(400, 300)
@@ -123,9 +123,9 @@ class MontaSpace(ProjectPersistenceMixin, QMainWindow):
             f"Videos currently playing: {playing}\n"
             f"Unique image previews: {len(pixmaps)}\n"
             f"Estimated decoded image pixels: {estimated_mb:.1f} MB\n"
-            f"Current process working set: {fmt(working)}\n"
-            f"Current process private committed memory: {fmt(private)}\n"
-            f"Peak process working set: {fmt(peak)}\n"
+            f"Current process RAM (Windows working set / macOS RSS): {fmt(working)}\n"
+            f"Private memory (Windows committed / macOS physical footprint): {fmt(private)}\n"
+            f"Peak process RAM (Windows working set / macOS RSS): {fmt(peak)}\n"
             f"Undo entries: {self.undo_stack.count()}\n\n"
             f"Video geometry (read-only):\n"
             + ("\n".join(f"  {video.geometry_report()}" for video in videos) if videos else "  none")
